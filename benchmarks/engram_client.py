@@ -176,6 +176,18 @@ class EngramClient:
             raise EngramError(f"ingest failed: {resp.status_code} {resp.text}")
         return resp.json()
 
+    def event_status(self, event_id: str) -> dict[str, Any]:
+        """GET one ingest event: {event_id, status, retry_count, projection_status}.
+
+        `status` is the canonical write (e.g. COMPLETE, GATED_SKIP, FAILED);
+        `projection_status` is the Neo4j copy (PENDING, PROJECTING, INDEXED,
+        FAILED). A gated-skip event has no projection, so it stays PENDING.
+        """
+        resp = self._http.get(f"/api/v1/events/{event_id}")
+        if resp.status_code != 200:
+            raise EngramError(f"event status failed: {resp.status_code} {resp.text}")
+        return resp.json()
+
     # -- drain (Issue A) ---------------------------------------------------
 
     def consolidation_status(self) -> dict[str, Any]:
