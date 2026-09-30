@@ -14,16 +14,27 @@
 #   .\scripts\local.ps1 worker        # Temporal worker, all queues  (own terminal)
 #   .\scripts\local.ps1 dispatcher    # outbox -> Temporal dispatcher (own terminal)
 #   .\scripts\local.ps1 smoke         # end-to-end smoke test (needs api/worker/dispatcher running)
+#   .\scripts\local.ps1 quota         # OpenCode quota (shared workspace)
+#   .\scripts\local.ps1 judge-test    # judge self-test, expect 4/4
+#   .\scripts\local.ps1 bench <args>  # run_locomo.py, e.g. bench --start-conv 0 --limit-convs 1
+#   .\scripts\local.ps1 merge <dirs>  # merge_results.py over run directories
 
+#
+# Overrides (environment variables): ENGRAM_LOCAL_ENV_FILE, ENGRAM_LOCAL_PYTHON.
+
+# A plain (non-advanced) param block with a single parameter, so every extra
+# word lands in $args and is passed through to the Python script unchanged.
 param(
-    [Parameter(Mandatory = $true, Position = 0)]
-    [ValidateSet("infra-up", "infra-ps", "infra-down", "migrate", "init", "health", "api", "worker", "dispatcher", "smoke")]
-    [string]$Command,
-    [string]$EnvFile = "",
-    [string]$Python = ""
+    [ValidateSet("infra-up", "infra-ps", "infra-down", "migrate", "init", "health", "api",
+        "worker", "dispatcher", "smoke", "quota", "judge-test", "bench", "merge")]
+    [string]$Command
 )
+$EnvFile = $env:ENGRAM_LOCAL_ENV_FILE
+$Python = $env:ENGRAM_LOCAL_PYTHON
 
 $ErrorActionPreference = "Stop"
+$Rest = @($args)  # extra words for bench/merge (captured before any nested block)
+if (-not $Command) { Write-Error "usage: .\scripts\local.ps1 <command> [args]  (see the header)" }
 
 # Repo root = parent of this script's directory.
 $RepoRoot = Split-Path -Parent $PSScriptRoot
@@ -65,5 +76,9 @@ switch ($Command) {
     "worker"     { & $Python -m engram.temporal.worker --queue all }
     "dispatcher" { & $Python -m engram.temporal.dispatcher }
     "smoke"      { & $Python benchmarks\smoke_canonical.py }
+    "quota"      { & $Python benchmarks\check_quota.py }
+    "judge-test" { & $Python benchmarks\judge.py }
+    "bench"      { & $Python benchmarks\run_locomo.py @Rest }
+    "merge"      { & $Python benchmarks\merge_results.py @Rest }
 }
 exit $LASTEXITCODE
