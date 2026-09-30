@@ -1,6 +1,6 @@
 """Thin Engram API client for the benchmark harness.
 
-Wraps the four things the harness needs from a running Engram instance and,
+Wraps the things the harness needs from a running Engram instance and,
 critically, solves the two correctness issues that would otherwise make the
 baseline lie:
 
@@ -9,52 +9,145 @@ baseline lie:
   actual isolation; we just create one tenant per conversation and send that
   conversation's traffic under its key.
 
-* Issue A (async ingest race) -> `wait_for_drain()`. Engram's /ingest returns
-  202 immediately and builds the memory in a background worker. Querying before
-  that finishes scores ~0% and looks like a retrieval failure when it is really
-  a timing bug. We block until the background work is done.
+* Issue A (async ingest race) -> `wait_for_drain()`. /ingest returns 202
+  before any memory exists. In the PostgreSQL-canonical architecture a message
+  is only findable after two background steps:
 
-Drain detection uses ONLY the public consolidation-status endpoint
-(GET /api/v1/consolidation/status), per the chosen approach. That endpoint
-reports the consolidation queue, which fills at the LAST step of ingest, so a
-naive "queue == 0" check suffers a "premature zero": right after POSTing, the
-worker has not started, the queue is still empty, and we would wrongly conclude
-we are done. `wait_for_drain()` guards against this with a rise-then-settle
-wait (see its docstring).
+    1. the canonical write -- its `events` row leaves RECEIVED
+       (COMPLETE, GATED_SKIP or FAILED), and
+    2. the Neo4j copy -- its PROJECTION rows in `workflow_dispatches` leave
+       PENDING/DISPATCHING/STARTED. Semantic retrieval searches Neo4j, so a
+       message written to PostgreSQL but not yet copied is still invisible.
 
-Residual limitation of the consolidation-only signal: if some ingest events
-never enqueue a consolidation task (e.g. a gated-skip or a failure), they leave
-no trace in this queue. The rise-then-settle wait plus a minimum floor covers
-the common case; if a full baseline ever looks suspiciously low, tighten this
-by also checking the event ledger's RECEIVED/PROCESSING counts.
+  Both are read straight from PostgreSQL, the source of truth. The old
+  consolidation-queue signal is NOT used: canonical ingest never fills that
+  queue (overviews are built on demand at query time), so it would report
+  "drained" before anything was stored -- exactly how a phantom 0% happened
+  on the old architecture.
+
+`wait_for_drain()` also returns terminal counts and the most common failure
+reasons, so the caller can refuse to score a conversation whose ingest did
+not actually succeed.
 """
 
 from __future__ import annotations
 
+import os
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
+import psycopg
+
+# Event statuses that mean "ingest still owes us work for this message".
+# GATED_STORE / INDEXED only occur in the legacy pipeline; harmless here.
+_PENDING_EVENT_STATUSES = ("RECEIVED", "PROCESSING", "GATED_STORE", "INDEXED")
+# Neo4j copy jobs that have not finished yet, and those that gave up.
+_PENDING_DISPATCH_STATUSES = ("PENDING", "DISPATCHING", "STARTED")
+_FAILED_DISPATCH_STATUSES = ("FAILED", "DEAD")
 
 
 class EngramError(RuntimeError):
     """Raised when Engram returns an unexpected HTTP status."""
 
 
-class DrainTimeoutError(RuntimeError):
+class DrainTimeout(RuntimeError):
     """Raised when ingest does not finish within the allotted time."""
 
 
 @dataclass
 class DrainConfig:
-    """Tunables for the rise-then-settle drain wait."""
+    """Tunables for the drain wait."""
 
-    max_wait_s: float = 600.0  # hard ceiling for one conversation's ingest
-    poll_interval_s: float = 2.0  # how often to poll the status endpoint
-    settle_s: float = 8.0  # queue must stay empty this long after activity
-    activity_grace_s: float = 45.0  # if no activity is ever seen, give up waiting
-    #                                 for a rise after this long and treat as drained
+    # The smoke test measured ~60 s per message for the write plus ~20 s for
+    # the Neo4j copy, 4 messages in parallel, so a ~340-pair conversation
+    # legitimately takes well over an hour.
+    max_wait_s: float = 10800.0  # hard ceiling for one conversation's ingest
+    poll_interval_s: float = 5.0  # how often to poll
+    stall_timeout_s: float = 600.0  # abort only if nothing moves for this long
+    # Tolerate a few permanently-wedged messages once this share is finished.
+    straggler_ok_ratio: float = 0.97
+    straggler_grace_s: float = 180.0
+    # Consecutive PostgreSQL read failures tolerated before giving up.
+    max_read_errors: int = 5
+
+
+@dataclass
+class DrainResult:
+    """Outcome of a drain wait — enough for the caller to judge run health."""
+
+    waited_s: float
+    events: dict[str, int]  # events by status for this tenant
+    projections: dict[str, int]  # Neo4j copy jobs by status for this tenant
+    failure_reasons: dict[str, int] = field(default_factory=dict)
+
+    @property
+    def total(self) -> int:
+        return sum(self.events.values())
+
+    @property
+    def failed(self) -> int:
+        return self.events.get("FAILED", 0)
+
+    @property
+    def pending(self) -> int:
+        return sum(self.events.get(s, 0) for s in _PENDING_EVENT_STATUSES)
+
+    @property
+    def stored(self) -> int:
+        """Events that produced memory (COMPLETE); GATED_SKIP stored nothing."""
+        return self.events.get("COMPLETE", 0)
+
+    @property
+    def projection_pending(self) -> int:
+        return sum(self.projections.get(s, 0) for s in _PENDING_DISPATCH_STATUSES)
+
+    @property
+    def projection_failed(self) -> int:
+        return sum(self.projections.get(s, 0) for s in _FAILED_DISPATCH_STATUSES)
+
+    def healthy(
+        self,
+        *,
+        min_stored_ratio: float = 0.5,
+        max_failed_ratio: float = 0.05,
+        max_pending_ratio: float = 0.03,
+        max_projection_failed_ratio: float = 0.05,
+    ) -> bool:
+        """True when ingest actually produced findable memory for most messages.
+
+        A run that fails this should not be scored: the questions would be
+        answered against a memory that was never built. Small tolerances apply —
+        a couple of wedged or failed messages out of hundreds does not
+        meaningfully change what is in memory.
+        """
+        if self.total == 0:
+            return False
+        if (self.failed / self.total) > max_failed_ratio:
+            return False
+        if (self.pending / self.total) > max_pending_ratio:
+            return False
+        projection_total = sum(self.projections.values())
+        if projection_total and (self.projection_failed / projection_total) > (
+            max_projection_failed_ratio
+        ):
+            return False
+        return (self.stored / self.total) >= min_stored_ratio
+
+    def summary(self) -> str:
+        events = ", ".join(f"{k}={v}" for k, v in sorted(self.events.items()))
+        copies = ", ".join(f"{k}={v}" for k, v in sorted(self.projections.items()))
+        return f"events: {events or '(none)'} | neo4j copies: {copies or '(none)'}"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "waited_s": round(self.waited_s, 1),
+            "events": self.events,
+            "projections": self.projections,
+            "failure_reasons": self.failure_reasons,
+        }
 
 
 @dataclass
@@ -70,6 +163,7 @@ class EngramClient:
     tenant_id: str = "_default"
     timeout_s: float = 60.0  # ingest / status / health (fast)
     query_timeout_s: float = 300.0  # /query fires several LLM calls; needs headroom
+    database_url: str | None = None  # PostgreSQL DSN; ENGRAM_DATABASE_URL when None
     _http: httpx.Client = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -102,6 +196,7 @@ class EngramClient:
         display_name: str = "",
         timeout_s: float = 60.0,
         query_timeout_s: float = 300.0,
+        database_url: str | None = None,
         reuse_if_exists: bool = True,
     ) -> EngramClient:
         """Create an isolated tenant and return a client bound to its key.
@@ -145,6 +240,7 @@ class EngramClient:
             tenant_id=tenant_id,
             timeout_s=timeout_s,
             query_timeout_s=query_timeout_s,
+            database_url=database_url,
         )
 
     # -- ingest ------------------------------------------------------------
@@ -190,74 +286,135 @@ class EngramClient:
 
     # -- drain (Issue A) ---------------------------------------------------
 
-    def consolidation_status(self) -> dict[str, Any]:
-        resp = self._http.get("/api/v1/consolidation/status")
-        if resp.status_code != 200:
-            raise EngramError(f"status failed: {resp.status_code} {resp.text}")
-        return resp.json()
+    def _dsn(self) -> str:
+        dsn = self.database_url or os.environ.get("ENGRAM_DATABASE_URL")
+        if not dsn:
+            raise EngramError("ENGRAM_DATABASE_URL is required to watch ingest progress")
+        return dsn
 
-    def _is_busy(self, status: dict[str, Any]) -> bool:
-        """True while the tenant still has consolidation work outstanding."""
-        if int(status.get("queue_depth", 0)) > 0:
-            return True
-        by_status = status.get("by_status") or {}
-        return any(int(by_status.get(s, 0)) > 0 for s in ("PENDING", "PROCESSING"))
+    def ingest_status(self) -> tuple[dict[str, int], dict[str, int]] | None:
+        """(events by status, Neo4j copy jobs by status) for this tenant.
 
-    def wait_for_drain(self, cfg: DrainConfig | None = None) -> dict[str, float]:
-        """Block until background ingest/consolidation for this tenant is done.
+        Read straight from PostgreSQL. Returns None if the read fails this
+        tick, so a brief connection hiccup does not abort a long wait.
+        """
+        try:
+            with psycopg.connect(self._dsn(), connect_timeout=10) as conn:
+                events = conn.execute(
+                    "SELECT status, count(*) FROM events WHERE tenant_id = %s GROUP BY status",
+                    (self.tenant_id,),
+                ).fetchall()
+                projections = conn.execute(
+                    "SELECT status, count(*) FROM workflow_dispatches "
+                    "WHERE tenant_id = %s AND workflow_type = 'PROJECTION' GROUP BY status",
+                    (self.tenant_id,),
+                ).fetchall()
+        except psycopg.Error:
+            return None
+        return (
+            {str(s): int(n) for s, n in events},
+            {str(s): int(n) for s, n in projections},
+        )
 
-        Rise-then-settle to defeat the "premature zero" (see module docstring):
+    def failure_reasons(self, limit: int = 5) -> dict[str, int]:
+        """Most common error messages of this tenant's FAILED events."""
+        try:
+            with psycopg.connect(self._dsn(), connect_timeout=10) as conn:
+                rows = conn.execute(
+                    "SELECT left(coalesce(error_message, '(no message)'), 160), count(*) "
+                    "FROM events WHERE tenant_id = %s AND status = 'FAILED' "
+                    "GROUP BY 1 ORDER BY 2 DESC LIMIT %s",
+                    (self.tenant_id, limit),
+                ).fetchall()
+        except psycopg.Error:
+            return {}
+        return {str(reason): int(n) for reason, n in rows}
 
-          1. Poll until we observe the queue go BUSY at least once -- proof the
-             worker actually picked up the just-ingested events. If we never see
-             activity within `activity_grace_s`, assume the batch drained faster
-             than our poll interval (or produced no consolidation work) and
-             proceed.
-          2. Once activity has been seen, wait for the queue to read empty
-             continuously for `settle_s` -- a momentary dip to zero between two
-             tasks does not count as drained.
+    def wait_for_drain(
+        self,
+        cfg: DrainConfig | None = None,
+        *,
+        on_progress: Callable[[float, dict[str, int], dict[str, int]], None] | None = None,
+        progress_every_s: float = 60.0,
+    ) -> DrainResult:
+        """Block until every message is written AND copied to Neo4j.
 
-        All bounded by `max_wait_s`. Returns timing telemetry for logging.
+        Raises DrainTimeout on the overall `max_wait_s`, when the counts are
+        completely frozen for `stall_timeout_s` (e.g. the worker or Temporal
+        is down), or when PostgreSQL cannot be read at all. A handful of
+        permanently-stuck stragglers is tolerated once `straggler_ok_ratio` of
+        messages are finished and nothing has moved for `straggler_grace_s`.
         """
         cfg = cfg or DrainConfig()
         start = time.monotonic()
-        seen_activity = False
-        idle_since: float | None = None
+        last_snapshot: tuple | None = None
+        last_change = start
+        last_report = start
+        read_errors = 0
+        events: dict[str, int] = {}
+        projections: dict[str, int] = {}
 
         while True:
             now = time.monotonic()
             elapsed = now - start
+
+            status = self.ingest_status()
+            if status is None:
+                read_errors += 1
+                if read_errors > cfg.max_read_errors:
+                    raise DrainTimeout(
+                        f"tenant {self.tenant_id}: cannot read ingest progress from "
+                        f"PostgreSQL ({read_errors} failed reads). Is the stack up?"
+                    )
+                time.sleep(cfg.poll_interval_s)
+                continue
+            read_errors = 0
+            events, projections = status
+
+            pending = sum(events.get(s, 0) for s in _PENDING_EVENT_STATUSES)
+            pending += sum(projections.get(s, 0) for s in _PENDING_DISPATCH_STATUSES)
+            total = sum(events.values()) or 1
+            finished_ratio = 1 - sum(events.get(s, 0) for s in _PENDING_EVENT_STATUSES) / total
+
+            # Progress = ANY movement in either breakdown, not just a drop in the
+            # pending total: RECEIVED -> COMPLETE also creates new copy jobs, so
+            # the total alone can stand still while real work is happening.
+            snapshot = (tuple(sorted(events.items())), tuple(sorted(projections.items())))
+            if snapshot != last_snapshot:
+                last_snapshot = snapshot
+                last_change = now
+
+            if on_progress is not None and (now - last_report) >= progress_every_s:
+                last_report = now
+                on_progress(elapsed, events, projections)
+
+            if pending == 0:
+                break
+
+            frozen_for = now - last_change
+            if finished_ratio >= cfg.straggler_ok_ratio and frozen_for >= cfg.straggler_grace_s:
+                # Nearly everything landed; a stuck message or two is not worth
+                # abandoning an otherwise complete ingest.
+                break
             if elapsed > cfg.max_wait_s:
-                raise DrainTimeoutError(
-                    f"tenant {self.tenant_id}: ingest did not drain within "
-                    f"{cfg.max_wait_s:.0f}s (seen_activity={seen_activity})"
+                raise DrainTimeout(
+                    f"tenant {self.tenant_id}: ingest not finished within "
+                    f"{cfg.max_wait_s:.0f}s; events={events} neo4j copies={projections}"
                 )
-
-            busy = self._is_busy(self.consolidation_status())
-
-            if busy:
-                seen_activity = True
-                idle_since = None
-            else:
-                if not seen_activity:
-                    # Possibly a premature zero: worker hasn't started. Only give
-                    # up waiting for a rise after the grace period.
-                    if elapsed >= cfg.activity_grace_s:
-                        return {
-                            "waited_s": elapsed,
-                            "saw_activity": 0.0,
-                        }
-                else:
-                    # Activity happened and the queue is now empty -> settle.
-                    if idle_since is None:
-                        idle_since = now
-                    elif now - idle_since >= cfg.settle_s:
-                        return {
-                            "waited_s": time.monotonic() - start,
-                            "saw_activity": 1.0,
-                        }
-
+            if frozen_for > cfg.stall_timeout_s:
+                raise DrainTimeout(
+                    f"tenant {self.tenant_id}: ingest STALLED — nothing changed for "
+                    f"{cfg.stall_timeout_s:.0f}s. Are the worker, dispatcher and "
+                    f"Temporal running? events={events} neo4j copies={projections}"
+                )
             time.sleep(cfg.poll_interval_s)
+
+        return DrainResult(
+            waited_s=time.monotonic() - start,
+            events=events,
+            projections=projections,
+            failure_reasons=self.failure_reasons() if events.get("FAILED") else {},
+        )
 
     # -- query -------------------------------------------------------------
 
@@ -266,26 +423,21 @@ class EngramClient:
         question: str,
         *,
         max_depth: str | None = None,
-        max_reentries: int | None = None,
         session_context: str | None = None,
     ) -> dict[str, Any]:
-        """POST a question. Returns {answer, retrieval_metadata, ...}.
+        """POST a question. Returns {answer, retrieval_metadata, answerability}.
 
         The full `retrieval_metadata` is preserved by the caller -- it is what
-        turns a bare score into failure analysis (l0_decision, cascade depth,
-        nodes retrieved, latency).
+        turns a bare score into failure analysis (route, answer mode, stop
+        reason, evidence counts, latency).
         """
         body: dict[str, Any] = {"query": question}
         if max_depth is not None:
             body["max_depth"] = max_depth
-        if max_reentries is not None:
-            body["max_reentries"] = max_reentries
         if session_context is not None:
             body["session_context"] = session_context
-        # Longer per-request timeout than the client default: a query drives the
-        # full cascade + several LLM calls. A transport error (incl. timeout) is
-        # wrapped as EngramError so callers catch it uniformly and one slow query
-        # cannot abort a whole benchmark run.
+        # A transport error (incl. timeout) is wrapped as EngramError so callers
+        # catch it uniformly and one slow query cannot abort a whole run.
         try:
             resp = self._http.post("/api/v1/query", json=body, timeout=self.query_timeout_s)
         except httpx.HTTPError as err:
@@ -313,16 +465,20 @@ def _turn(content: str, timestamp: str | None, turn_idx: int | None) -> dict[str
 
 
 if __name__ == "__main__":
-    # Tiny connectivity smoke test. Needs a running Engram + env vars:
-    #   ENGRAM_BASE_URL (default http://127.0.0.1:8000)
-    #   ENGRAM_API_KEY  (default local tenant key)
-    import os
+    # Tiny connectivity check. Needs a running Engram + ENGRAM_API_KEY and
+    # ENGRAM_DATABASE_URL (loaded from .env.local when run from the repo root).
+    import sys
+    from pathlib import Path
 
-    base = os.environ.get("ENGRAM_BASE_URL", "http://127.0.0.1:8000")
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from envfile import load_env_file
+
+    load_env_file()
+    base = os.environ.get("ENGRAM_BASE_URL", "http://127.0.0.1:8001")
     key = os.environ.get("ENGRAM_API_KEY")
     if not key:
-        raise SystemExit("set ENGRAM_API_KEY to run the smoke test")
+        raise SystemExit("set ENGRAM_API_KEY to run the connectivity check")
 
     with EngramClient(base_url=base, api_key=key) as client:
         print("health:", client.health())
-        print("consolidation status:", client.consolidation_status())
+        print("default-tenant ingest status:", client.ingest_status())
