@@ -1,140 +1,157 @@
-"""Diagnostic: does a minted tenant key actually scope ingest to its tenant?
+"""Diagnostic: are conversations in different tenants really kept apart?
 
-Confirms or refutes the finding that LoCoMo data landed in `_default` instead
-of its per-conversation tenant. Talks to the server over HTTP (so it is
-working-directory independent for the API calls) and then reads PostgreSQL
-to see how each ingest was tagged.
+The benchmark gives each LoCoMo conversation its own tenant, so this must hold
+before a full run. PostgreSQL row-level security is not enforced for the table
+owner Engram connects as, so separation relies on the app's own tenant filters.
+Two fresh tenants each store one made-up fact; then three layers are checked:
 
-It ingests TWO pairs:
-  * one with a freshly-minted tenant key  -> should be tagged <that tenant>
-  * one with the legacy/default key        -> should be tagged _default
+1. Tagging -- each ingest is recorded under the tenant whose key sent it
+   (the old architecture once filed everything under `_default`).
+2. Search (decisive) -- the app's own Neo4j vector search, run as each tenant,
+   may only return memories that PostgreSQL says belong to that tenant. The
+   owner's search must return its own fact (control).
+3. Answers -- a question asked in the other tenant must not mention the fact.
+   Own-tenant answers are shown for information only: a refusal there is a
+   retrieval-quality issue (e.g. the exact-label evidence filter), not a leak.
 
-Set ENGRAM_DATABASE_URL to the same PostgreSQL database used by the server
-before running this diagnostic.
+Costs ~10 model calls; needs the API, worker and dispatcher running.
+
+    .\\scripts\\local.ps1 isolation
 """
 
 from __future__ import annotations
 
 import os
+import sys
 import time
 from pathlib import Path
 
-import httpx
 import psycopg
 
-BASE = os.environ.get("ENGRAM_BASE_URL", "http://127.0.0.1:8000")
+REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO / "benchmarks"))
+# The search check uses Engram's own Neo4j store, so load the local config.
+os.environ.setdefault("ENGRAM_CONFIG_PATH", str(REPO / "config.local.yaml"))
+
+from engram_client import EngramClient  # noqa: E402
+from envfile import load_env_file  # noqa: E402
+
+FACTS = {
+    "a": (
+        "[2023-06-01T10:00:00] Priya: My neighbour Zorblax told me his favourite colour is "
+        "chartreuse.",
+        "[2023-06-01T10:00:00] Omar: Chartreuse? That's a bold favourite colour, Zorblax!",
+    ),
+    "b": (
+        "[2023-06-01T10:00:00] Lena: I just adopted a cat and named her Biscuit.",
+        "[2023-06-01T10:00:00] Tom: Biscuit is a lovely name for a cat, Lena!",
+    ),
+}
+# (question, word that proves the fact was found, tenant that owns the fact)
+PROBES = [
+    ("What is Zorblax's favourite colour?", "chartreuse", "a"),
+    ("What is the name of Lena's cat?", "biscuit", "b"),
+]
 
 
-def load_env_keys() -> dict[str, str]:
-    """Pull keys from environment, falling back to a nearby .env file."""
-    keys = {
-        k: os.environ[k]
-        for k in (
-            "ENGRAM_ADMIN_KEY",
-            "ENGRAM_API_KEY",
-            "ENGRAM_DATABASE_URL",
-        )
-        if k in os.environ
-    }
-    if all(
-        name in keys
-        for name in (
-            "ENGRAM_ADMIN_KEY",
-            "ENGRAM_API_KEY",
-            "ENGRAM_DATABASE_URL",
-        )
-    ):
-        return keys
-    for candidate in (".env", "../.env", "../../.env"):
-        p = Path(candidate)
-        if not p.exists():
-            continue
-        for line in p.read_text().splitlines():
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                name, val = line.split("=", 1)
-                keys.setdefault(name.strip(), val.strip().strip('"').strip("'"))
-        break
-    return keys
-
-
-def ingest_one(key: str, source: str) -> int:
-    r = httpx.post(
-        f"{BASE}/api/v1/ingest",
-        headers={"Authorization": f"Bearer {key}"},
-        json={
-            "session_id": "diag",
-            "turn_pair": {
-                "user": {"content": "diag user", "turn_idx": 0},
-                "assistant": {"content": "diag asst", "turn_idx": 1},
-            },
-            "source": source,
-        },
-    )
-    return r.status_code
-
-
-def tenant_for_source(database_url: str, source: str) -> str | None:
-    with psycopg.connect(database_url) as connection:
-        row = connection.execute(
-            "SELECT tenant_id FROM events WHERE source = %s ORDER BY created_at DESC LIMIT 1",
-            (source,),
-        ).fetchone()
-    return row[0] if row else None
+def owners_of(dsn: str, memory_ids: list[str]) -> dict[str, str]:
+    """memory_id -> tenant_id, according to PostgreSQL (the source of truth)."""
+    with psycopg.connect(dsn) as conn:
+        rows = conn.execute(
+            "SELECT id::text, tenant_id FROM memory_nodes WHERE id::text = ANY(%s)",
+            (memory_ids,),
+        ).fetchall()
+    return {str(i): str(t) for i, t in rows}
 
 
 def main() -> int:
-    keys = load_env_keys()
-    admin = keys.get("ENGRAM_ADMIN_KEY")
-    default_key = keys.get("ENGRAM_API_KEY")
-    database_url = keys.get("ENGRAM_DATABASE_URL")
-    if not admin:
-        print("ERROR: ENGRAM_ADMIN_KEY not found in env or .env")
+    load_env_file()
+    base = os.environ.get("ENGRAM_BASE_URL", "http://127.0.0.1:8001")
+    admin = os.environ.get("ENGRAM_ADMIN_KEY")
+    dsn = os.environ.get("ENGRAM_DATABASE_URL")
+    if not admin or not dsn:
+        print("ERROR: ENGRAM_ADMIN_KEY and ENGRAM_DATABASE_URL are required")
         return 2
 
-    if not database_url:
-        print("ERROR: ENGRAM_DATABASE_URL not found in env or .env")
-        return 2
-    print("using PostgreSQL control plane\n")
+    stamp = time.strftime("%m%d%H%M%S")
+    clients = {
+        name: EngramClient.create_tenant(
+            base_url=base, admin_key=admin, tenant_id=f"iso-{name}-{stamp}"
+        )
+        for name in FACTS
+    }
+    for name, client in clients.items():
+        user, assistant = FACTS[name]
+        client.ingest_pair(
+            session_id="iso", user_content=user, assistant_content=assistant,
+            user_turn_idx=0, assistant_turn_idx=1, source=f"iso-{client.tenant_id}",
+        )
+        print(f"tenant {client.tenant_id}: stored one fact, waiting for write + Neo4j copy...")
+    for client in clients.values():
+        print(f"  {client.tenant_id}: {client.wait_for_drain().summary()}")
 
-    # 1) mint a fresh tenant + key
-    tid = "diag-" + time.strftime("%H%M%S")
-    r = httpx.post(
-        f"{BASE}/api/v1/admin/tenants",
-        headers={"Authorization": f"Bearer {admin}"},
-        json={"tenant_id": tid, "display_name": "diag"},
-    )
-    if r.status_code not in (200, 201):
-        print(f"ERROR: create-tenant returned {r.status_code}: {r.text[:300]}")
+    leaks = 0
+    controls_missed = 0
+
+    print("\n1) Tagging (which tenant each ingest was filed under)")
+    with psycopg.connect(dsn) as conn:
+        for client in clients.values():
+            row = conn.execute(
+                "SELECT tenant_id FROM events WHERE source = %s", (f"iso-{client.tenant_id}",)
+            ).fetchone()
+            got = row[0] if row else None
+            leaks += got != client.tenant_id
+            print(f"  {'PASS' if got == client.tenant_id else 'FAIL'}  "
+                  f"expected {client.tenant_id}, got {got}")
+
+    print("\n2) Search layer (who owns every memory the Neo4j search returns)")
+    from engram.config import get_config
+    from engram.models.embeddings import EmbeddingService
+    from engram.storage.neo4j_store import Neo4jStore
+
+    cfg = get_config()
+    store = Neo4jStore(cfg.knowledge_graph)
+    embed = EmbeddingService.get(cfg.gating)
+    try:
+        for question, _word, owner in PROBES:
+            vector = embed.embed(question)
+            for name, client in clients.items():
+                rows = store.vector_search(vector, k=12, tenant_id=client.tenant_id)
+                ids = [str(r["memory_id"]) for r in rows if r.get("memory_id")]
+                owner_map = owners_of(dsn, ids)
+                foreign = [i for i in ids if owner_map.get(i) != client.tenant_id]
+                leaks += len(foreign)
+                note = ""
+                if name == owner and not ids:
+                    controls_missed += 1
+                    note = "  CONTROL MISSED"
+                print(f"  [{client.tenant_id}] {question}: {len(ids)} result(s), "
+                      f"{len(foreign)} from another tenant{note}")
+    finally:
+        store.close()
+
+    print("\n3) Answers (the other tenant must not mention the fact)")
+    for question, word, owner in PROBES:
+        for name, client in clients.items():
+            answer = client.query(question).get("answer", "")
+            found = word in answer.lower()
+            if name == owner:
+                label = "own tenant (info)"
+            else:
+                label = "LEAK" if found else "no leak"
+                leaks += found
+            print(f"  [{client.tenant_id}] {question}\n      -> {label}: {answer[:140]}")
+
+    for client in clients.values():
+        client.close()
+    if leaks:
+        print(f"\nVERDICT: FAIL - {leaks} leak(s) or mis-tagged ingest(s), see above")
         return 1
-    minted = r.json()["api_key"]
-    print(f"minted tenant: {tid}")
-    print(f"minted key == default key? {minted == default_key}\n")
-
-    # 2) ingest with minted key (unique source) and with the default key
-    src_minted = f"diag-minted-{tid}"
-    src_default = f"diag-default-{tid}"
-    print("ingest with minted key ->", ingest_one(minted, src_minted))
-    if default_key:
-        print("ingest with default key ->", ingest_one(default_key, src_default))
-    time.sleep(1.5)
-
-    # 3) read back how each was tagged
-    got_minted = tenant_for_source(database_url, src_minted)
-    got_default = tenant_for_source(database_url, src_default) if default_key else "(skipped)"
-
-    print("\n--- VERDICT ---")
-    print(f"minted-key ingest : expected={tid:<14} got={got_minted}")
-    print(f"default-key ingest: expected={'_default':<14} got={got_default}")
-    print()
-    if got_minted == tid:
-        print("PASS: tenant isolation works on the server. If real runs still")
-        print("      land in _default, the bug is in the harness key handling.")
-    elif got_minted == "_default":
-        print("FAIL: a valid minted key is being resolved to _default on the")
-        print("      server side. Tenant context is not reaching ingest.")
-    else:
-        print(f"UNEXPECTED: got {got_minted!r} — investigate manually.")
+    if controls_missed:
+        print("\nVERDICT: INCONCLUSIVE - a tenant's own search found nothing, so the "
+              "absence of leaks proves little")
+        return 1
+    print("\nVERDICT: PASS - tenants are kept apart (tagging, search and answers)")
     return 0
 
 

@@ -14,6 +14,7 @@
 #   .\scripts\local.ps1 worker        # Temporal worker, all queues  (own terminal)
 #   .\scripts\local.ps1 dispatcher    # outbox -> Temporal dispatcher (own terminal)
 #   .\scripts\local.ps1 smoke         # end-to-end smoke test (needs api/worker/dispatcher running)
+#   .\scripts\local.ps1 isolation     # tenant tagging + retrieval-leak check
 #   .\scripts\local.ps1 quota         # OpenCode quota (shared workspace)
 #   .\scripts\local.ps1 judge-test    # judge self-test, expect 4/4
 #   .\scripts\local.ps1 bench <args>  # run_locomo.py, e.g. bench --start-conv 0 --limit-convs 1
@@ -26,7 +27,7 @@
 # word lands in $args and is passed through to the Python script unchanged.
 param(
     [ValidateSet("infra-up", "infra-ps", "infra-down", "migrate", "init", "health", "api",
-        "worker", "dispatcher", "smoke", "quota", "judge-test", "bench", "merge")]
+        "worker", "dispatcher", "smoke", "isolation", "quota", "judge-test", "bench", "merge")]
     [string]$Command
 )
 $EnvFile = $env:ENGRAM_LOCAL_ENV_FILE
@@ -76,6 +77,7 @@ switch ($Command) {
     "worker"     { & $Python -m engram.temporal.worker --queue all }
     "dispatcher" { & $Python -m engram.temporal.dispatcher }
     "smoke"      { & $Python benchmarks\smoke_canonical.py }
+    "isolation"  { & $Python benchmarks\diag_isolation.py }
     "quota"      { & $Python benchmarks\check_quota.py }
     "judge-test" { & $Python benchmarks\judge.py }
     "bench"      { & $Python benchmarks\run_locomo.py @Rest }
