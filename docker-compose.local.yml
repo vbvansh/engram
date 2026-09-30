@@ -1,0 +1,155 @@
+# Local development infrastructure for the PostgreSQL-canonical architecture.
+#
+# Runs ONLY the backing services in Docker: PostgreSQL, Temporal (+ UI), Neo4j
+# and Redis. The Engram API, Temporal worker and dispatcher run natively from
+# the venv, so a code change needs a process restart instead of an image build.
+#
+# Service definitions mirror docker-compose.prod.yml. Differences:
+#   - its own project name, so it never shares containers or volumes with the
+#     old filesystem-era stack (both repo folders are named "engram");
+#   - ports are published on 127.0.0.1 so the native processes can reach them;
+#   - Neo4j and Redis use host ports 7688/7475 and 6380 so they can run beside
+#     the old stack's 7687/7474 and 6379; PostgreSQL uses 5433;
+#   - the Postgres init script is copied with CRLF stripped, because a Windows
+#     checkout gives it CRLF line endings that /bin/sh cannot run.
+#
+# Usage (PowerShell, from the repo root):  .\scripts\local.ps1 infra-up
+name: engram-atul-local
+
+services:
+  postgres:
+    image: postgres:16.6-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env.local}
+      ENGRAM_DB_PASSWORD: ${ENGRAM_DB_PASSWORD:?set ENGRAM_DB_PASSWORD in .env.local}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        tr -d '\r' < /engram-init/01-databases.sh > /docker-entrypoint-initdb.d/01-databases.sh &&
+        chmod +x /docker-entrypoint-initdb.d/01-databases.sh &&
+        exec docker-entrypoint.sh postgres
+        -c password_encryption=scram-sha-256
+        -c max_connections=200
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./deploy/postgres/init:/engram-init:ro
+    # Host port 5433: this workstation already runs a native PostgreSQL 16
+    # service on 5432.
+    ports:
+      - "127.0.0.1:5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  temporal-schema:
+    image: temporalio/admin-tools:${TEMPORAL_ADMIN_VERSION:-1.30.6}
+    environment:
+      ENGRAM_DB_PASSWORD: ${ENGRAM_DB_PASSWORD}
+    depends_on:
+      postgres: { condition: service_healthy }
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - >-
+        (temporal-sql-tool --plugin postgres12 --endpoint postgres --port 5432 --user temporal_app --password "$${ENGRAM_DB_PASSWORD}" --database temporal setup-schema --version 0.0 ||
+         temporal-sql-tool --plugin postgres12 --endpoint postgres --port 5432 --user temporal_app --password "$${ENGRAM_DB_PASSWORD}" --database temporal update-schema -d /etc/temporal/schema/postgresql/v12/temporal/versioned) &&
+        temporal-sql-tool --plugin postgres12 --endpoint postgres --port 5432 --user temporal_app --password "$${ENGRAM_DB_PASSWORD}" --database temporal update-schema -d /etc/temporal/schema/postgresql/v12/temporal/versioned &&
+        (temporal-sql-tool --plugin postgres12 --endpoint postgres --port 5432 --user temporal_app --password "$${ENGRAM_DB_PASSWORD}" --database temporal_visibility setup-schema --version 0.0 ||
+         temporal-sql-tool --plugin postgres12 --endpoint postgres --port 5432 --user temporal_app --password "$${ENGRAM_DB_PASSWORD}" --database temporal_visibility update-schema -d /etc/temporal/schema/postgresql/v12/visibility/versioned) &&
+        temporal-sql-tool --plugin postgres12 --endpoint postgres --port 5432 --user temporal_app --password "$${ENGRAM_DB_PASSWORD}" --database temporal_visibility update-schema -d /etc/temporal/schema/postgresql/v12/visibility/versioned
+    restart: "no"
+
+  temporal:
+    image: temporalio/server:${TEMPORAL_SERVER_VERSION:-1.30.4.1}
+    environment:
+      DB: postgres12
+      DBNAME: temporal
+      DB_PORT: "5432"
+      POSTGRES_SEEDS: postgres
+      POSTGRES_USER: temporal_app
+      POSTGRES_PWD: ${ENGRAM_DB_PASSWORD}
+      VISIBILITY_DBNAME: temporal_visibility
+      VISIBILITY_POSTGRES_SEEDS: postgres
+      VISIBILITY_POSTGRES_USER: temporal_app
+      VISIBILITY_POSTGRES_PWD: ${ENGRAM_DB_PASSWORD}
+      BIND_ON_IP: 0.0.0.0
+      DYNAMIC_CONFIG_FILE_PATH: /etc/temporal/config/dynamicconfig/docker.yaml
+    volumes:
+      - ./deploy/temporal/dynamicconfig/docker.yaml:/etc/temporal/config/dynamicconfig/docker.yaml:ro
+    depends_on:
+      temporal-schema: { condition: service_completed_successfully }
+    ports:
+      - "127.0.0.1:7233:7233"
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 7233"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 10s
+
+  temporal-namespace:
+    image: temporalio/admin-tools:${TEMPORAL_ADMIN_VERSION:-1.30.6}
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+    depends_on:
+      temporal: { condition: service_healthy }
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - >-
+        temporal operator namespace describe --namespace engram-local ||
+        temporal operator namespace create --namespace engram-local --retention 14d
+    restart: on-failure:5
+
+  temporal-ui:
+    image: temporalio/ui:2.36.0
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_DEFAULT_NAMESPACE: engram-local
+    depends_on:
+      temporal: { condition: service_started }
+    ports:
+      - "127.0.0.1:8080:8080"
+
+  neo4j:
+    image: neo4j:5.24-community
+    environment:
+      NEO4J_AUTH: "neo4j/${NEO4J_ADMIN_PASSWORD:?set NEO4J_ADMIN_PASSWORD in .env.local}"
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_dbms_security_procedures_unrestricted: "apoc.*"
+      NEO4J_dbms_security_procedures_allowlist: "apoc.*"
+      NEO4J_server_memory_heap_initial__size: "512m"
+      NEO4J_server_memory_heap_max__size: "1G"
+      NEO4J_server_memory_pagecache_size: "512m"
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    ports:
+      - "127.0.0.1:7475:7474"
+      - "127.0.0.1:7688:7687"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:7474 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    ports:
+      - "127.0.0.1:6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  postgres_data:
+  neo4j_data:
+  neo4j_logs:
+  redis_data:

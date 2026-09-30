@@ -1,0 +1,88 @@
+# Local development profile for the PostgreSQL-canonical architecture.
+#
+# Same runtime shape as config.prod.yaml (canonical memory ON, Temporal ON),
+# but every address points at the Docker services in docker-compose.local.yml.
+# Addresses use 127.0.0.1 rather than "localhost": on Windows "localhost" can
+# resolve to IPv6 ::1 first, and the containers only listen on IPv4.
+# Secrets come from .env.local through ${VAR} interpolation.
+api:
+  host: "127.0.0.1"
+  port: 8001
+  api_key: ${ENGRAM_API_KEY}
+  admin_key: ${ENGRAM_ADMIN_KEY}
+
+core_model:
+  provider: "openai_responses"
+  model_path: "muse-spark-1.3-contributor"
+  api_base: "https://opencode.ai/zen/go/v1"
+  api_key: ${OPENCODE_GO_API_KEY}
+  # This provider accepts temperature=1 only.
+  temperature: 1
+  max_tokens: 2048
+  reasoning_effort: "low"
+  timeout_seconds: 60
+
+frontier_llm:
+  provider: "openai_responses"
+  model_path: "muse-spark-1.3-contributor"
+  api_base: "https://opencode.ai/zen/go/v1"
+  api_key: ${OPENCODE_GO_API_KEY}
+  temperature: 1
+  reasoning_effort: "low"
+
+canonical_memory:
+  enabled: true
+  require_temporal: true
+  allow_filesystem_runtime: false
+  legacy_uri_status_code: 410
+  artifact_retention_hours: 24
+
+# Retained only for offline export tooling; canonical runtime never uses it.
+filesystem:
+  data_dir: "./data/local-export"
+  create_dirs: false
+
+knowledge_graph:
+  backend: "neo4j"
+  uri: "bolt://127.0.0.1:7688"
+  writer_username: "neo4j"
+  writer_password: ${NEO4J_ADMIN_PASSWORD}
+  reader_username: "neo4j"
+  reader_password: ${NEO4J_ADMIN_PASSWORD}
+
+event_ledger:
+  backend: "postgres"
+  dsn: ${ENGRAM_DATABASE_URL}
+  reconciliation_interval_seconds: 60
+  stale_overview_scan_interval_seconds: 86400
+
+temporal:
+  enabled: true
+  address: "127.0.0.1:7233"
+  namespace: "engram-local"
+  ingest_task_queue: "engram-ingest"
+  code_ingest_task_queue: "engram-code-ingest"
+  projection_task_queue: "engram-projection"
+  consolidation_task_queue: "engram-consolidation"
+  maintenance_task_queue: "engram-maintenance"
+  worker_concurrency: 4
+  maintenance_worker_concurrency: 1
+  dispatch_interval_seconds: 1.0
+  history_retention_days: 14
+
+session_cache:
+  backend: "redis"
+  redis_url: "redis://127.0.0.1:6380"
+
+consolidation:
+  max_concurrent_tasks: 4
+  max_backlog: 10000
+
+retrieval:
+  max_l1_vector_results: 12
+  overview_budget_tokens: 6000
+  full_doc_budget_tokens: 20000
+
+decay:
+  schedule: "0 3 * * *"
+  schedule_timezone: "UTC"
