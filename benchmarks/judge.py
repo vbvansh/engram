@@ -4,8 +4,12 @@ LoCoMo answers are free-form ("Psychology, counseling certification"), so a
 string match cannot decide correctness -- Engram may phrase the same fact
 completely differently. We ask a model to grade semantic equivalence instead.
 
-Judge model: Muse Spark through the OpenCode Go Responses API, matching
-Engram's production model path.
+Judge model: MiMo-V2.5 via OpenCode Zen Go's Chat Completions endpoint, at
+temperature 0 so the same answer is always graded the same way. It is the
+judge used for the old architecture's 48.7% baseline; keep it fixed for every
+new-architecture run. (Engram's own Muse Spark only accepts temperature 1,
+which would add grading noise.) Kept dependency-free of Engram internals so
+the harness runs on its own.
 
 Two grading modes:
 
@@ -15,8 +19,6 @@ Two grading modes:
 * Adversarial questions (category 5, ~446 of them) -> the question is NOT
   answerable from the conversation, so the ONLY correct behaviour is abstention.
   A confident fabricated answer is marked wrong even though it is fluent text.
-  This is the abstention signal that maps onto Engram's frontier "can't answer"
-  path, so grading it correctly matters.
 """
 
 from __future__ import annotations
@@ -24,13 +26,24 @@ from __future__ import annotations
 import json
 import os
 import time
+import uuid
 from dataclasses import dataclass
 
-import openai
+import httpx
 
-# Defaults mirror config.yaml so the judge lines up with Engram's own provider.
 DEFAULT_BASE = "https://opencode.ai/zen/go/v1"
-DEFAULT_MODEL = "muse-spark-1.3-contributor"
+DEFAULT_MODEL = "mimo-v2.5"
+# The new stack names the OpenCode key OPENCODE_GO_API_KEY; the old one used
+# OPENCODE_API_KEY. Either works — it is the same OpenCode Zen Go key.
+API_KEY_ENVS = ("OPENCODE_GO_API_KEY", "OPENCODE_API_KEY")
+
+
+def judge_api_key() -> str | None:
+    """Return the first OpenCode key found in the environment."""
+    for name in API_KEY_ENVS:
+        if os.environ.get(name):
+            return os.environ[name]
+    return None
 
 
 @dataclass
@@ -76,8 +89,8 @@ _ADVERSARIAL_SYSTEM = (
 )
 
 
-class MuseSparkJudge:
-    """Grade predictions with Muse Spark through OpenCode Go."""
+class OpenCodeJudge:
+    """Grades predictions via an OpenAI-compatible Chat Completions endpoint."""
 
     def __init__(
         self,
@@ -88,51 +101,73 @@ class MuseSparkJudge:
         timeout_s: float = 60.0,
         max_retries: int = 3,
     ) -> None:
-        api_key = api_key or os.environ.get("OPENCODE_GO_API_KEY")
+        api_key = api_key or judge_api_key()
         if not api_key:
-            raise RuntimeError("OPENCODE_GO_API_KEY is required for the judge")
+            raise RuntimeError(f"one of {', '.join(API_KEY_ENVS)} is required for the judge")
         self.model = model
         self.max_retries = max_retries
-        self._client = openai.OpenAI(
-            api_key=api_key,
+        # Providers vary in whether they accept response_format=json_object.
+        # Start with it on; _chat drops it permanently after a 4xx rejection.
+        self._use_json_mode = True
+        self._http = httpx.Client(
             base_url=base_url.rstrip("/"),
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                # OpenCode Zen 400s without a stable session id, and asks
+                # clients to identify themselves rather than look like a bare
+                # HTTP library. Other providers ignore both headers.
+                "x-opencode-session": os.environ.get("OPENCODE_SESSION_ID")
+                or f"engram-judge-{uuid.uuid4().hex}",
+                "User-Agent": "engram-benchmark-judge/1.0",
+            },
             timeout=timeout_s,
-            max_retries=0,
         )
 
     def close(self) -> None:
-        self._client.close()
+        self._http.close()
 
-    def __enter__(self) -> MuseSparkJudge:
+    def __enter__(self) -> OpenCodeJudge:
         return self
 
     def __exit__(self, *exc: object) -> None:
         self.close()
 
     def _chat(self, system: str, user: str) -> str:
-        """Make one Responses API call, with a small transport retry."""
+        """One deterministic JSON chat call, with a small retry on transport."""
         last_err: Exception | None = None
         for attempt in range(self.max_retries + 1):
+            payload: dict[str, object] = {
+                "model": self.model,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                "temperature": 0.0,
+                "max_tokens": 256,
+            }
+            if self._use_json_mode:
+                payload["response_format"] = {"type": "json_object"}
             try:
-                response = self._client.responses.create(
-                    model=self.model,
-                    instructions=system,
-                    input=user,
-                    max_output_tokens=1024,
-                    temperature=1.0,
-                    extra_headers={
-                        "User-Agent": "engram-locomo/0.1.0",
-                        "x-opencode-session": "engram-locomo-judge",
-                    },
-                )
-                content = response.output_text or ""
+                resp = self._http.post("/chat/completions", json=payload)
+                # Some providers reject response_format; drop it and retry once.
+                if resp.status_code in (400, 422) and self._use_json_mode:
+                    self._use_json_mode = False
+                    continue
+                resp.raise_for_status()
+                data = resp.json()
+                content = ""
+                choices = data.get("choices")
+                if isinstance(choices, list) and choices:
+                    msg = choices[0].get("message")
+                    if isinstance(msg, dict) and isinstance(msg.get("content"), str):
+                        content = msg["content"]
                 # An empty 200 reply (the model returned nothing) is transient —
                 # treat it like a transport error and retry rather than surfacing
                 # it as an unparseable grade.
                 if content.strip():
                     return content
                 last_err = RuntimeError("empty judge response")
-            except openai.APIError as err:
+            except (httpx.HTTPError, json.JSONDecodeError) as err:
                 last_err = err
             if attempt < self.max_retries:
                 time.sleep(0.5 * (attempt + 1))
@@ -181,10 +216,8 @@ class MuseSparkJudge:
             user = (
                 base_user
                 if attempt == 0
-                else (
-                    base_user + "\n\nReturn ONLY this JSON object and nothing else: "
-                    '{"correct": true or false, "reason": "one short sentence"}'
-                )
+                else base_user + "\n\nReturn ONLY this JSON object and nothing else: "
+                '{"correct": true or false, "reason": "one short sentence"}'
             )
             try:
                 raw = self._chat(system, user)
@@ -202,7 +235,14 @@ class MuseSparkJudge:
 
 if __name__ == "__main__":
     # Self-test with fixed cases so you can eyeball the judge before a real run.
-    # Needs OPENCODE_GO_API_KEY in the environment.
+    # Reads the OpenCode key from the environment or a nearby .env file.
+    import sys
+    from pathlib import Path as _Path
+
+    sys.path.insert(0, str(_Path(__file__).resolve().parent))
+    from envfile import load_env_file
+
+    load_env_file()
     cases = [
         # (question, gold, predicted, is_adversarial, expected_correct)
         (
@@ -222,15 +262,10 @@ if __name__ == "__main__":
         ),
         ("What is Caroline's dog's name?", "(unanswerable)", "Her dog's name is Rex.", True, False),
     ]
-    with MuseSparkJudge() as judge:
+    with OpenCodeJudge() as judge:
         passed = 0
         for q, gold, pred, adv, expected in cases:
-            r = judge.judge(
-                question=q,
-                gold_answer=gold,
-                predicted_answer=pred,
-                is_adversarial=adv,
-            )
+            r = judge.judge(question=q, gold_answer=gold, predicted_answer=pred, is_adversarial=adv)
             ok = r.correct == expected
             passed += ok
             tag = "PASS" if ok else "FAIL"
