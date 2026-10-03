@@ -89,6 +89,35 @@ _ADVERSARIAL_SYSTEM = (
 )
 
 
+# The LLM-as-a-Judge prompt from the Mem0 paper (arXiv 2504.19413, Appendix A),
+# verbatim. It is the "J" score most LoCoMo results are reported with. It is
+# deliberately lenient ("same topic = correct"), so we keep the strict prompts
+# above for our own before/after comparisons and use this one only to compare
+# with published numbers.
+MEM0_JUDGE_PROMPT = (
+    'Your task is to label an answer to a question as "CORRECT" or "WRONG". You will be '
+    "given the following data: (1) a question (posed by one user to another user), (2) a "
+    "'gold' (ground truth) answer, (3) a generated answer which you will score as "
+    "CORRECT/WRONG. The point of the question is to ask about something one user should "
+    "know about the other user based on their prior conversations. The gold answer will "
+    "usually be a concise and short answer that includes the referenced topic, for "
+    "example: Question: Do you remember what I got the last time I went to Hawaii? Gold "
+    "answer: A shell necklace The generated answer might be much longer, but you should "
+    "be generous with your grading - as long as it touches on the same topic as the gold "
+    "answer, it should be counted as CORRECT. For time related questions, the gold answer "
+    "will be a specific date, month, year, etc. The generated answer might be much longer "
+    "or use relative time references (like 'last Tuesday' or 'next month'), but you should "
+    "be generous with your grading - as long as it refers to the same date or time period "
+    "as the gold answer, it should be counted as CORRECT. Even if the format differs "
+    "(e.g., 'May 7th' vs '7 May'), consider it CORRECT if it's the same date. Now it's "
+    "time for the real question: Question: {question} Gold answer: {gold_answer} "
+    "Generated answer: {generated_answer} First, provide a short (one sentence) "
+    "explanation of your reasoning, then finish with CORRECT or WRONG. Do NOT include both "
+    "CORRECT and WRONG in your response, or it will break the evaluation script. Just "
+    'return the label CORRECT or WRONG in a json format with the key as "label".'
+)
+
+
 class OpenCodeJudge:
     """Grades predictions via an OpenAI-compatible Chat Completions endpoint."""
 
@@ -231,6 +260,35 @@ class OpenCodeJudge:
                 correct, reason = parsed
                 return JudgeResult(correct=correct, reason=reason, raw=raw)
         return JudgeResult(correct=False, reason="judge-unparseable", raw=last_raw, judged=False)
+
+    def judge_mem0(self, *, question: str, gold_answer: str, predicted_answer: str) -> JudgeResult:
+        """Grade with the Mem0 paper's lenient prompt (the published "J" score).
+
+        Never raises; a failed call comes back with judged=False.
+        """
+        prompt = MEM0_JUDGE_PROMPT.format(
+            question=question,
+            gold_answer=gold_answer or "(none)",
+            generated_answer=predicted_answer or "(empty)",
+        )
+        try:
+            raw = self._chat("You are a careful grader.", prompt)
+        except RuntimeError as err:
+            return JudgeResult(correct=False, reason=f"judge-error: {err}", judged=False)
+        label = None
+        start, end = raw.find("{"), raw.rfind("}")
+        if start != -1 and end > start:
+            try:
+                label = str(json.loads(raw[start : end + 1]).get("label", "")).upper()
+            except json.JSONDecodeError:
+                label = None
+        if label not in ("CORRECT", "WRONG"):
+            has_c, has_w = "CORRECT" in raw.upper(), "WRONG" in raw.upper()
+            label = "CORRECT" if has_c and not has_w else "WRONG" if has_w and not has_c else None
+        if label is None:
+            return JudgeResult(correct=False, reason="judge-unparseable", raw=raw, judged=False)
+        reason = raw[:start].strip() if start > 0 else ""
+        return JudgeResult(correct=label == "CORRECT", reason=reason[:300], raw=raw)
 
 
 if __name__ == "__main__":
