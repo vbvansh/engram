@@ -19,6 +19,7 @@
 #   .\scripts\local.ps1 judge-test    # judge self-test, expect 4/4
 #   .\scripts\local.ps1 bench <args>  # run_locomo.py, e.g. bench --start-conv 0 --limit-convs 1
 #   .\scripts\local.ps1 merge <dirs>  # merge_results.py over run directories
+#   .\scripts\local.ps1 score <dir>   # standard LoCoMo metrics (F1, BLEU-1; add --judge for J)
 
 #
 # Overrides (environment variables): ENGRAM_LOCAL_ENV_FILE, ENGRAM_LOCAL_PYTHON.
@@ -27,7 +28,7 @@
 # word lands in $args and is passed through to the Python script unchanged.
 param(
     [ValidateSet("infra-up", "infra-ps", "infra-down", "migrate", "init", "health", "api",
-        "worker", "dispatcher", "smoke", "isolation", "quota", "judge-test", "bench", "merge")]
+        "worker", "dispatcher", "smoke", "isolation", "quota", "judge-test", "bench", "merge", "score")]
     [string]$Command
 )
 $EnvFile = $env:ENGRAM_LOCAL_ENV_FILE
@@ -82,5 +83,6 @@ switch ($Command) {
     "judge-test" { & $Python benchmarks\judge.py }
     "bench"      { & $Python benchmarks\run_locomo.py @Rest }
     "merge"      { & $Python benchmarks\merge_results.py @Rest }
+    "score"      { & $Python benchmarks\score_locomo.py @Rest }
 }
 exit $LASTEXITCODE
