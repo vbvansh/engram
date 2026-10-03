@@ -13,14 +13,20 @@ Every question row keeps Engram's retrieval_metadata (route, answer mode, stop
 reason, evidence counts, latency), not just right/wrong -- that trace is what
 powers the later failure analysis without having to re-run the benchmark.
 
-A full 10-conversation pass takes many hours, so run it in resumable chunks
-and merge them afterwards with merge_results.py:
+All tenants share one Neo4j vector index that is filtered by tenant only
+after the nearest neighbours are found, so other conversations' memories can
+crowd out results. For a fair baseline, store EVERY conversation first and ask
+questions only afterwards, so each one is measured against the same index:
 
-    # pilot: conversation 0 (conv-26) only
-    python benchmarks/run_locomo.py --start-conv 0 --limit-convs 1
+    # 1) store, conv-26 first (pilot: time + quota), then the other nine
+    python benchmarks/run_locomo.py --ingest-only --tenant-run base1 --start-conv 0 --limit-convs 1
+    python benchmarks/run_locomo.py --ingest-only --tenant-run base1 --start-conv 1
 
-    # the rest, in pieces
-    python benchmarks/run_locomo.py --start-conv 1 --limit-convs 3
+    # 2) ask all questions against the stored tenants
+    python benchmarks/run_locomo.py --reuse-tenant "locomo-base1-c{conv}" --query-workers 3
+
+    # 3) merge chunked question runs, if any
+    python benchmarks/merge_results.py benchmarks/results/locomo-<run1> ...
 
 Env (loaded from .env.local when run from the repo root):
     ENGRAM_BASE_URL       default http://127.0.0.1:8001
@@ -261,7 +267,7 @@ def run(args: argparse.Namespace) -> int:
             if args.reuse_tenant:
                 tenant_id = args.reuse_tenant.replace("{conv}", str(cidx))
             else:
-                tenant_id = f"{args.tenant_prefix}-{run_id}-c{cidx}"
+                tenant_id = f"{args.tenant_prefix}-{args.tenant_run or run_id}-c{cidx}"
             print(f"\n[conv {cidx}] {conv.sample_id} tenant={tenant_id}"
                   + ("  (reusing existing ingest)" if args.reuse_tenant else ""))
             try:
@@ -277,6 +283,7 @@ def run(args: argparse.Namespace) -> int:
                 continue
 
             with client:
+                n_pairs = None
                 if args.reuse_tenant:
                     print("  skipping ingest (--reuse-tenant)")
                 else:
@@ -305,7 +312,7 @@ def run(args: argparse.Namespace) -> int:
                     print(f"  drained in {drain.waited_s / 60:.1f}m | {drain.summary()}")
                     for reason, n in drain.failure_reasons.items():
                         print(f"    FAILED x{n}: {reason}")
-                    ingests[conv.sample_id] = drain.to_dict()
+                    ingests[conv.sample_id] = {**drain.to_dict(), "pairs_sent": n_pairs}
                 except DrainTimeout as err:
                     print(f"  ! DRAIN FAILED: {err}")
 
@@ -322,6 +329,12 @@ def run(args: argparse.Namespace) -> int:
                                         "reason": detail})
                         continue
                     print(f"  ! ingest incomplete ({detail}) — scoring anyway (--force)")
+
+                if args.ingest_only:
+                    # Every conversation is stored before any question is asked,
+                    # so all of them are queried against the same shared index.
+                    print("  stored; questions skipped (--ingest-only)")
+                    continue
 
                 questions = conv.qa
                 if args.categories:
@@ -392,8 +405,20 @@ def run(args: argparse.Namespace) -> int:
     summary["config"] = run_config(base_url, args.judge_model)
     summary["ingest"] = ingests
     summary["skipped_conversations"] = skipped
+    summary["mode"] = ("ingest-only" if args.ingest_only
+                       else "questions-only" if args.reuse_tenant else "ingest+questions")
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
-    print(format_summary(summary, title="RUN"))
+    if args.ingest_only:
+        print("\n" + "=" * 62 + "\nINGEST ONLY - no questions asked\n" + "=" * 62)
+        for sample_id, info in ingests.items():
+            print(f"  {sample_id}: {info['pairs_sent']} pairs in {info['waited_s'] / 60:.1f}m"
+                  f" | events={info['events']} neo4j copies={info['projections']}")
+            for reason, n in info["failure_reasons"].items():
+                print(f"      FAILED x{n}: {reason}")
+        for s in skipped:
+            print(f"  ! SKIPPED conv{s['conv_idx']} ({s['sample_id']}): {s['reason']}")
+    else:
+        print(format_summary(summary, title="RUN"))
     print(f"\nrows:    {rows_path}")
     print(f"summary: {summary_path}")
     return 0
@@ -466,6 +491,12 @@ def main() -> int:
     p.add_argument("--reuse-tenant", default=None, metavar="TENANT_OR_TEMPLATE",
                    help="query an already-ingested tenant instead of re-ingesting; "
                         "may contain {conv}, e.g. locomo-0930120000-c{conv}")
+    p.add_argument("--ingest-only", action="store_true",
+                   help="store and wait, but ask no questions; ask them later with "
+                        "--reuse-tenant once every conversation is stored")
+    p.add_argument("--tenant-run", default=None, metavar="NAME",
+                   help="fixed middle part of tenant ids (locomo-NAME-c0...) so chunked "
+                        "ingest runs share one naming scheme; default: this run's id")
     p.add_argument("--tenant-prefix", default="locomo")
     p.add_argument("--out", default="benchmarks/results")
     return run(p.parse_args())
