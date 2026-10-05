@@ -411,7 +411,8 @@ def _merge_hints(first: list[str], second: list[str]) -> list[str]:
 
 def _predicate_hint(lowered_query: str) -> str | None:
     for terms, predicate in _PREDICATE_HINTS:
-        if any(term in lowered_query for term in terms):
+        # Whole words only: "work" must not match inside "workshop".
+        if any(re.search(rf"\b{re.escape(term)}\b", lowered_query) for term in terms):
             return normalize_predicate(predicate).canonical_predicate
     return None
 

@@ -105,13 +105,26 @@ class EvidenceGate:
             )
             for row in evidence
         ]
+        next_route = _next_route(plan, attempted_routes)
         if plan.predicate_hint:
-            # An exact predicate query must never become answerable from an
-            # unrelated claim or from a whole-memory body. This also keeps the
-            # final model context small and prevents plausible over-answering.
-            verified = [
+            exact = [
                 row for row in verified if _predicate_matches(row.predicate, plan.predicate_hint)
             ]
+            if exact or (plan.allow_escalation and next_route is not None):
+                # While a route that may hold the exact fact remains, an exact
+                # predicate query must not become answerable from an unrelated
+                # claim or a whole-memory body.
+                verified = exact
+            else:
+                # Every route was tried and no fact carries the expected label.
+                # The label is only a guess from the question's wording (or the
+                # model planner), so answer from the found memories like an
+                # ordinary semantic query instead of refusing. Conflict checks
+                # concern the asked label, which none of these rows carries.
+                plan = plan.model_copy(
+                    update={"predicate_hint": None, "requires_conflict_check": False}
+                )
+                verified = [row for row in verified if _query_covered(plan.query, row)]
         elif plan.intent in {RetrievalIntent.SEMANTIC, RetrievalIntent.GENERAL}:
             # Vector similarity is discovery, not evidence of query coverage.
             # Require a lexical bridge in hydrated canonical text before an
@@ -151,7 +164,6 @@ class EvidenceGate:
                 state = AnswerabilityState.ANSWERABLE
                 reason = "verified canonical evidence is sufficient"
 
-        next_route = _next_route(plan, attempted_routes)
         can_escalate = bool(plan.allow_escalation and next_route is not None)
         if state is AnswerabilityState.ANSWERABLE:
             can_escalate = False

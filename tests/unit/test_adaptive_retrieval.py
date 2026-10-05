@@ -596,6 +596,99 @@ def test_unrelated_semantic_body_is_not_answerable() -> None:
     assert assessment.verified_evidence == []
 
 
+def test_keyword_inside_a_longer_word_sets_no_expected_label() -> None:
+    # "work" inside "workshop" is not a question about an employer.
+    plan = AdaptivePlanner().plan("When did Melanie go to the pottery workshop?")
+
+    assert plan.predicate_hint is None
+
+
+def _expected_label_plan(query: str) -> RetrievalPlan:
+    return RetrievalPlan(
+        query=query,
+        intent="current_fact",
+        primary_route="L1",
+        routes=["L1", "L2", "L4"],
+        predicate_hint="PREFERS",
+        requires_conflict_check=True,
+    )
+
+
+def _verified(**overrides: Any) -> VerifiedEvidence:
+    return VerifiedEvidence.model_validate(
+        RetrievalCandidate.from_row(_canonical_claim(**overrides), canonical=True).model_dump()
+    )
+
+
+_ALL_ROUTES = [RetrievalRoute.L1, RetrievalRoute.L2, RetrievalRoute.L4]
+
+
+def test_missing_expected_label_still_escalates_while_routes_remain() -> None:
+    found = _verified(predicate="HAS_FAVORITE_COLOR", object_value="chartreuse",
+                      text="Zorblax's favourite colour is chartreuse.")
+
+    assessment = EvidenceGate().assess(
+        _expected_label_plan("What is Zorblax's favourite colour?"),
+        [found],
+        attempted_routes=[RetrievalRoute.L1],
+    )
+
+    assert assessment.state is AnswerabilityState.INSUFFICIENT_EVIDENCE
+    assert assessment.can_escalate
+
+
+def test_found_memory_is_kept_when_no_fact_has_the_expected_label() -> None:
+    # After the last route, a memory that matches the question must reach the
+    # answer model instead of being discarded only because its label differs.
+    found = _verified(predicate="HAS_FAVORITE_COLOR", object_value="chartreuse",
+                      text="Zorblax's favourite colour is chartreuse.")
+
+    assessment = EvidenceGate().assess(
+        _expected_label_plan("What is Zorblax's favourite colour?"),
+        [found],
+        attempted_routes=_ALL_ROUTES,
+    )
+
+    assert assessment.state is AnswerabilityState.ANSWERABLE
+    assert [row.object_value for row in assessment.verified_evidence] == ["chartreuse"]
+
+
+def test_fallback_memories_are_not_checked_for_label_conflicts() -> None:
+    # With no fact for the asked label, two values of another label are just
+    # found memories (Melanie plays two instruments), not a contradiction.
+    rows = [
+        _verified(claim_id="c1", subject_id="entity-melanie", predicate="PLAYS",
+                  object_value="clarinet", text="Melanie plays the clarinet."),
+        _verified(claim_id="c2", subject_id="entity-melanie", predicate="PLAYS",
+                  object_value="violin", text="Melanie plays the violin."),
+    ]
+
+    assessment = EvidenceGate().assess(
+        _expected_label_plan("Which instruments are Melanie's favourite to play?"),
+        rows,
+        attempted_routes=_ALL_ROUTES,
+    )
+
+    assert assessment.state is AnswerabilityState.ANSWERABLE
+    assert len(assessment.verified_evidence) == 2
+
+
+def test_exact_label_facts_still_win_over_other_memories() -> None:
+    exact = _verified(claim_id="c1", predicate="PREFERS", object_value="chartreuse",
+                      text="Zorblax prefers chartreuse.")
+    other = _verified(claim_id="c2", predicate="HAS_FAVORITE_FOOD", object_value="soup",
+                      text="Zorblax's favourite food is soup.")
+
+    assessment = EvidenceGate().assess(
+        _expected_label_plan("What is Zorblax's favourite colour?"),
+        [exact, other],
+        attempted_routes=_ALL_ROUTES,
+    )
+
+    assert assessment.state is AnswerabilityState.ANSWERABLE
+    assert [row.object_value for row in assessment.verified_evidence] == ["chartreuse"]
+
+
 def test_conflicting_active_values_are_not_answerable() -> None:
     plan = RetrievalPlan(
         query="What is the current role?",
