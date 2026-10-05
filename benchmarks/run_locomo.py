@@ -146,6 +146,22 @@ def ingest_conversation(client: EngramClient, conv: Conversation, *, limit_pairs
     return n
 
 
+def load_question_list(path: str) -> dict[str, set[int]]:
+    """Read a question list: one `sample_id:q_idx` per line (e.g. conv-26:12).
+
+    Used for quick checks that re-ask only the questions a fix targets.
+    Blank lines and lines starting with '#' are ignored.
+    """
+    selected: dict[str, set[int]] = defaultdict(set)
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        sample_id, _, q_idx = line.rpartition(":")
+        selected[sample_id].add(int(q_idx))
+    return dict(selected)
+
+
 def run_config(base_url: str, judge_model: str) -> dict:
     """What produced this run: needed to compare runs honestly later."""
     repo = Path(__file__).resolve().parents[1]
@@ -254,12 +270,19 @@ def run(args: argparse.Namespace) -> int:
           f"[{indexed[0][0]}..{indexed[-1][0]}] -> {out_dir}" if indexed
           else f"run {run_id}: no conversations selected")
 
+    selected = load_question_list(args.questions) if args.questions else None
+    if selected is not None:
+        print(f"selected questions: {sum(len(v) for v in selected.values())} "
+              f"from {args.questions}")
+
     rows: list[dict] = []
     skipped: list[dict] = []
     ingests: dict[str, dict] = {}
     with OpenCodeJudge(model=args.judge_model) as judge, \
             open(rows_path, "w", encoding="utf-8") as rows_fh:
         for cidx, conv in indexed:
+            if selected is not None and conv.sample_id not in selected:
+                continue  # no selected question in this conversation
             # --reuse-tenant re-queries a tenant that was already ingested,
             # skipping the expensive ingest. It may be a literal id or a
             # template containing {conv} (tenants of a chunked run share a
@@ -336,10 +359,16 @@ def run(args: argparse.Namespace) -> int:
                     print("  stored; questions skipped (--ingest-only)")
                     continue
 
-                questions = conv.qa
+                # Keep each question's ORIGINAL index: runs are compared
+                # question by question on (sample_id, q_idx), so filtering must
+                # never renumber them.
+                questions = list(enumerate(conv.qa))
+                if selected is not None:
+                    questions = [(i, q) for i, q in questions
+                                 if i in selected.get(conv.sample_id, set())]
                 if args.categories:
                     wanted = {c.strip() for c in args.categories.split(",") if c.strip()}
-                    questions = [q for q in questions if q.category_name in wanted]
+                    questions = [(i, q) for i, q in questions if q.category_name in wanted]
                 if args.limit_questions:
                     questions = questions[: args.limit_questions]
                 print(f"  asking {len(questions)} questions "
@@ -351,7 +380,7 @@ def run(args: argparse.Namespace) -> int:
                     futures = {
                         pool.submit(_answer_one, client, judge, probe, args.max_depth):
                             (qidx, probe)
-                        for qidx, probe in enumerate(questions)
+                        for qidx, probe in questions
                     }
                     for future in as_completed(futures):
                         qidx, probe = futures[future]
@@ -466,6 +495,9 @@ def main() -> int:
                    help="0-based index of the first conversation to run; use with "
                         "--limit-convs to process the benchmark in resumable chunks")
     p.add_argument("--limit-questions", type=int, default=0, help="0 = all per conv")
+    p.add_argument("--questions", default=None, metavar="FILE",
+                   help="ask only the questions listed in FILE (one sample_id:q_idx per "
+                        "line), e.g. the ones a fix targets")
     p.add_argument("--categories", default="",
                    help="comma-separated category filter, e.g. 'temporal' "
                         "(names: multi_hop,temporal,open_domain,single_hop,adversarial)")
