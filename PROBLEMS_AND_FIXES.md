@@ -8,7 +8,7 @@ and how to fix each one. The numbers come from that test.
 
 | # | Problem | How much it costs | Fix in short |
 |---|---|---|---|
-| 1 | Found memories are thrown away | 149 questions, all answered wrong | Keep found memories when their label does not match |
+| 1 | Found memories are thrown away | 149 questions, all answered wrong | Keep found memories when their label does not match — **fixed** (see result below) |
 | 2 | False "conflicting evidence" alarms | 95 questions, all answered wrong | Only call it a conflict for facts that can have one value |
 | 3 | Dates stay as "last week" | Date questions: only 24% correct | Turn relative times into real dates when storing |
 | 4 | Facts get wrong or vague labels | Feeds problem 1; template answers only 10% correct | A label list for everyday life, fixed synonyms |
@@ -41,6 +41,24 @@ about the workshop is found, then thrown away.
 - Use the expected label to *rank* results, not to *remove* them.
 - If no fact has the expected label, give the answer model the memories that
   were found instead of refusing.
+
+**Result — fixed.** Keywords now match whole words, and when no fact has the
+expected label after every search route, Engram answers from the memories it
+found. Measured on all questions, compared one by one with the run before:
+
+| | Before | After |
+|---|---|---|
+| Refusals caused by this problem | 194 | 9 |
+| The 149 affected questions answered correctly | 0 | 78 |
+| Strict score (1,540 questions) | 36.4% | 41.1% (+4.7, not luck) |
+| J score (1,540 questions) | 48.5% | 53.3% (+4.7, not luck) |
+| Trick (adversarial) questions handled correctly | 68.6% | 66.6% (−2.0, within luck) |
+| Correct answers over all 1,986 questions | 867 | 930 (+63) |
+
+All other questions changed only as much as they do by chance, so the gain
+comes from the questions this fix targeted. The small drop on trick questions
+was expected: some of them were "correct" only because Engram refused
+everything.
 
 ## 2. False "conflicting evidence" alarms
 
