@@ -710,3 +710,88 @@ def test_conflicting_active_values_are_not_answerable() -> None:
     assessment = EvidenceGate().assess(plan, evidence, attempted_routes=[RetrievalRoute.L1])
     assert assessment.state is AnswerabilityState.CONFLICTING_EVIDENCE
     assert not assessment.can_escalate
+
+
+def _current_fact_plan(query: str, predicate_hint: str | None = None) -> RetrievalPlan:
+    return RetrievalPlan(
+        query=query,
+        intent="current_fact",
+        primary_route="L1",
+        routes=["L1"],
+        predicate_hint=predicate_hint,
+        requires_conflict_check=True,
+    )
+
+
+def test_two_values_of_a_many_valued_label_are_not_a_conflict() -> None:
+    # The registry gives PREFERS many values at once: Caroline prefers both.
+    rows = [
+        _verified(claim_id="c1", subject_id="entity-caroline", predicate="PREFERS",
+                  object_value="painting", text="Caroline prefers painting."),
+        _verified(claim_id="c2", subject_id="entity-caroline", predicate="PREFERS",
+                  object_value="hiking", text="Caroline prefers hiking."),
+    ]
+
+    assessment = EvidenceGate().assess(
+        _current_fact_plan("What does Caroline prefer?", predicate_hint="PREFERS"),
+        rows,
+        attempted_routes=[RetrievalRoute.L1],
+    )
+
+    assert assessment.state is AnswerabilityState.ANSWERABLE
+    assert assessment.conflicts == []
+
+
+def test_two_values_of_an_unregistered_label_are_not_a_conflict() -> None:
+    # Labels outside the registry (ENJOYS) default to many values.
+    rows = [
+        _verified(claim_id="c1", subject_id="entity-caroline", predicate="ENJOYS",
+                  object_value="painting", text="Caroline enjoys painting."),
+        _verified(claim_id="c2", subject_id="entity-caroline", predicate="ENJOYS",
+                  object_value="hiking", text="Caroline enjoys hiking."),
+    ]
+
+    assessment = EvidenceGate().assess(
+        _current_fact_plan("What does Caroline enjoy?"),
+        rows,
+        attempted_routes=[RetrievalRoute.L1],
+    )
+
+    assert assessment.state is AnswerabilityState.ANSWERABLE
+    assert len(assessment.verified_evidence) == 2
+
+
+def test_a_clash_in_a_label_the_question_does_not_ask_about_does_not_block_it() -> None:
+    # Two cities for Calvin (a one-value label) say nothing about his goal.
+    rows = [
+        _verified(claim_id="c1", subject_id="entity-calvin", predicate="LOCATED_IN",
+                  object_value="Boston", text="Calvin lives in Boston."),
+        _verified(claim_id="c2", subject_id="entity-calvin", predicate="LOCATED_IN",
+                  object_value="Tokyo", text="Calvin lives in Tokyo."),
+        _verified(claim_id="c3", subject_id="entity-calvin", predicate="HAS_GOAL",
+                  object_value="expand his brand worldwide",
+                  text="Calvin's biggest goal is to expand his brand worldwide."),
+    ]
+
+    assessment = EvidenceGate().assess(
+        _current_fact_plan("What is Calvin's biggest current goal?"),
+        rows,
+        attempted_routes=[RetrievalRoute.L1],
+    )
+
+    assert assessment.state is AnswerabilityState.ANSWERABLE
+    assert len(assessment.verified_evidence) == 3
+
+
+def test_a_conflict_flagged_in_storage_still_blocks_the_answer() -> None:
+    flagged = _verified(claim_id="c1", subject_id="entity-calvin", predicate="ENJOYS",
+                        object_value="painting", text="Calvin enjoys painting.", conflict=True)
+
+    assessment = EvidenceGate().assess(
+        _current_fact_plan("What does Calvin enjoy?"),
+        [flagged],
+        attempted_routes=[RetrievalRoute.L1],
+    )
+
+    assert assessment.state is AnswerabilityState.CONFLICTING_EVIDENCE
+    assert assessment.conflicts == ["c1"]

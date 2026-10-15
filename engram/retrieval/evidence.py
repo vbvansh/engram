@@ -8,7 +8,7 @@ from collections.abc import Iterable, Sequence
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from engram.predicate_registry import normalize_predicate
+from engram.predicate_registry import Cardinality, normalize_predicate
 from engram.retrieval.domain import (
     AnswerabilityState,
     EvidenceAssessment,
@@ -188,22 +188,30 @@ class EvidenceGate:
             for row in evidence
             if row.conflict
         ]
-        groups: dict[tuple[str, str], list[VerifiedEvidence]] = defaultdict(list)
+        # Different values contradict each other only for the label the
+        # question asks about, and only when the predicate registry allows that
+        # label one value at a time. Many-valued labels (PREFERS, MEMBER_OF and
+        # every unregistered label such as ENJOYS) coexist, and a clash in some
+        # other found fact (a person's city) says nothing about the asked one
+        # (their goal). Conflicts flagged in storage still count.
+        asked = normalize_predicate(plan.predicate_hint) if plan.predicate_hint else None
+        if asked is None or asked.cardinality != Cardinality.SINGLE:
+            return _unique(explicit)
+        by_subject: dict[str, list[VerifiedEvidence]] = defaultdict(list)
         for row in evidence:
-            predicate = (row.predicate or "").casefold()
-            if not predicate:
+            if not _predicate_matches(row.predicate, asked.canonical_predicate):
                 continue
             subject = row.subject_id or row.memory_id or row.source_uri or "unknown-subject"
-            groups[(subject, predicate)].append(row)
+            by_subject[subject].append(row)
         inferred: list[str] = []
-        for (subject, predicate), rows in groups.items():
+        for subject, rows in by_subject.items():
             if len(rows) < 2:
                 continue
             values = {_value_key(row) for row in rows}
             if len(values) < 2:
                 continue
             if _intervals_overlap(rows):
-                inferred.append(f"{subject}:{predicate}")
+                inferred.append(f"{subject}:{asked.canonical_predicate.casefold()}")
         return _unique([*explicit, *inferred])
 
 
