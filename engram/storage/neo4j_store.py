@@ -701,26 +701,32 @@ class Neo4jStore:
     ) -> list[dict[str, Any]]:
         """Top-K tenant-scoped nodes by cosine similarity on l0_embedding.
 
-        Per §10.4, over-fetch by 1.5x then filter by retrieval_weight.
+        Ranks only this tenant's nodes, exactly. The l0_idx vector index is
+        shared by every tenant and cannot filter inside its search, so taking
+        its global top-K and filtering afterwards let other tenants' similar
+        memories crowd this tenant's out. ``vector.similarity.cosine`` gives
+        the same normalized score as the index; ``tenant_idx`` limits the scan
+        to this tenant's nodes.
         """
         tid = tenant_id or current_tenant_id()
-        over_k = max(k + 5, int(k * 1.5))
         cypher = (
-            "CALL db.index.vector.queryNodes('l0_idx', $k, $vec) YIELD node, score "
+            "MATCH (node:Node) "
             "WHERE node.tenant_id = $tenant_id "
             "AND node.status = 'ACTIVE' "
+            "AND node.l0_embedding IS NOT NULL "
             "AND coalesce(node.retrieval_weight, 1.0) >= $floor "
         )
         if uri_prefix:
             cypher += "AND node.source_uri STARTS WITH $prefix "
         cypher += (
+            "WITH node, vector.similarity.cosine(node.l0_embedding, $vec) AS score "
             "RETURN node.source_uri AS source_uri, node.l0_abstract AS l0_abstract, "
             "score, node.memory_id AS memory_id, "
             "node.projected_revision AS projected_revision, "
-            "node.node_type AS node_type ORDER BY score DESC"
+            "node.node_type AS node_type ORDER BY score DESC LIMIT $k"
         )
         params: dict[str, Any] = {
-            "k": over_k,
+            "k": k,
             "vec": query_embedding,
             "floor": dormant_floor,
             "tenant_id": tid,
