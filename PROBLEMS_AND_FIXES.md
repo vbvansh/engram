@@ -9,7 +9,7 @@ and how to fix each one. The numbers come from that test.
 | # | Problem | How much it costs | Fix in short |
 |---|---|---|---|
 | 1 | Found memories are thrown away | 149 questions, all answered wrong | Keep found memories when their label does not match — **fixed** (see result below) |
-| 2 | False "conflicting evidence" alarms | 95 questions, all answered wrong | Only call it a conflict for facts that can have one value |
+| 2 | False "conflicting evidence" alarms | 95 questions, all answered wrong | Only call it a conflict for facts that can have one value — **fixed** (see result below) |
 | 3 | Dates stay as "last week" | Date questions: only 24% correct | Turn relative times into real dates when storing |
 | 4 | Facts get wrong or vague labels | Feeds problem 1; template answers only 10% correct | A label list for everyday life, fixed synonyms |
 | 5 | Other users' memories crowd out search results | Every question (not yet measured) | Filter by user inside the search, not after it |
@@ -85,6 +85,29 @@ a member of more than one team, so Engram sees a "conflict" and refuses.
 - Once facts have dates (problem 3), compare the dates: an old job followed by
   a new job is history, not a conflict.
 
+**Result — fixed.** Engram now calls two facts a conflict only when the
+question asks about one kind of fact, that kind can hold just one value at a
+time (a current job, a home city), and the found facts of that kind disagree.
+A clash in some other fact (Calvin's city) no longer blocks a question about
+something else (his goals). Conflicts the database itself marked still stop
+the answer. Measured on all questions, compared one by one with the run after
+fix 1:
+
+| | Before | After |
+|---|---|---|
+| Refusals caused by this problem | 111 | 0 |
+| The 88 affected questions answered correctly | 1 | 29 |
+| Strict score (1,540 questions) | 41.1% | 45.5% (+4.4, not luck) |
+| J score (1,540 questions) | 53.2% | 56.8% (+3.6, not luck) |
+| Trick (adversarial) questions handled correctly | 66.6% | 66.6% (no change) |
+| Correct answers over all 1,986 questions | 930 | 998 (+68) |
+
+The gain has two sources. The affected questions gained 28 and lost none.
+Questions that used to search further after a false conflict now answer at
+the first step, and gained 28 while losing 10. The remaining questions changed
+about as much as they do by chance. The 24 affected trick questions lost 9, as
+expected: they were "correct" only because Engram refused all of them.
+
 ## 3. Dates stay as "last week"
 
 **What happens.** When a conversation is stored, the date of each message is
@@ -117,7 +140,10 @@ Some synonyms are wrong: "attended" always means "attends school", so
 LGBTQ support group"*.
 
 **Cost.** It feeds problem 1 (labels that never match), and the short template
-answers Engram builds from these labels are right only 10% of the time.
+answers Engram builds from these labels are right only 10% of the time. After
+fix 2 more questions reach these templates: 59 template answers, and only 3 of
+the 43 on normal questions are right — for example "nate room attended
+game_convention and convention." for "When did Nate attend a cooking show?".
 
 **Fix.**
 - Add labels for everyday life: likes, hobbies, family, pets, events attended,
