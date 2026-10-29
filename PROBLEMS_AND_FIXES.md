@@ -12,7 +12,7 @@ and how to fix each one. The numbers come from that test.
 | 2 | False "conflicting evidence" alarms | 95 questions, all answered wrong | Only call it a conflict for facts that can have one value — **fixed** (see result below) |
 | 3 | Dates stay as "last week" | Date questions: only 24% correct | Turn relative times into real dates when storing |
 | 4 | Facts get wrong or vague labels | Feeds problem 1; template answers only 10% correct | A label list for everyday life, fixed synonyms |
-| 5 | Other users' memories crowd out search results | Every question (not yet measured) | Filter by user inside the search, not after it |
+| 5 | Other users' memories crowd out search results | Search missed 8.5% of the right memories; no score change | Filter by user inside the search, not after it — **fixed** (see result below) |
 | 6 | Messages are stored without their context | Not yet measured | Send earlier turns; don't drop a whole message |
 
 ---
@@ -160,7 +160,10 @@ removes the ones that belong to other users. If other users have similar
 memories, this user may get only a few results — or none.
 
 **Cost.** Affects every question, and a user's results change depending on
-how much *other* data is stored. Not yet measured.
+how much *other* data is stored. Measured with the 10 conversations stored:
+the search found only 91.5% of the 12 memories it should have found, and 5
+questions got no results at all. The three conversations with a person called
+John crowded each other most.
 
 **Fix.**
 - Filter by user *inside* the search, not after it (a search that supports
@@ -168,6 +171,31 @@ how much *other* data is stored. Not yet measured.
 - Until then, fetch many more results before filtering (for example 200
   instead of 18).
 - Measure it: count how many of the 18 results belong to the right user.
+
+**Result — fixed.** The search now looks only at the asking user's memories
+and ranks all of them exactly, so other users' data can no longer push them
+out. Measured on all questions, compared one by one with the run after fix 2:
+
+| | Before | After |
+|---|---|---|
+| Right memories found by the search (best 12 per question) | 91.5% | 100% |
+| Questions that got no search results | 5 | 0 |
+| The 128 most-crowded normal questions answered correctly | 54 | 60 (+6, within luck) |
+| Strict score (1,540 questions) | 45.5% | 45.5% (no change) |
+| J score (1,540 questions) | 56.8% | 57.1% (+0.3, within luck) |
+| Trick (adversarial) questions handled correctly | 66.6% | 61.9% (−4.7, just within luck) |
+| Correct answers over all 1,986 questions | 998 | 976 (−22, within luck) |
+| Time per question (median) | 19 s | 19 s |
+
+The search is now correct, but on this test it did not change the score: the
+memories it used to miss were mostly lower-ranked ones. The fix was kept under
+a rule agreed before the run: nothing may get significantly worse. Trick
+questions came closest. With more of its own memories, Engram more often
+answers with details instead of saying it has no record. About half of the
+lost trick questions correct the question ("it was Caroline, not Melanie") but
+add details, which the strict judge counts as wrong. Watch this in the next
+fixes. An internet outage broke part of the first run, so 1,088 questions
+were asked again with the same code and the two parts were combined.
 
 ## 6. Messages are stored without their context
 
