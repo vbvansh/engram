@@ -795,3 +795,125 @@ def test_a_conflict_flagged_in_storage_still_blocks_the_answer() -> None:
 
     assert assessment.state is AnswerabilityState.CONFLICTING_EVIDENCE
     assert assessment.conflicts == ["c1"]
+
+
+def test_a_keyword_in_a_question_asking_for_more_is_only_a_label_guess() -> None:
+    plan = AdaptivePlanner().plan("How does John say his team handles tough opponents?")
+
+    assert plan.predicate_hint == "MEMBER_OF"
+    assert plan.predicate_hint_guessed
+    assert not plan.requires_conflict_check
+
+
+def test_a_question_asking_only_for_the_label_keeps_the_exact_lookup() -> None:
+    for query in (
+        "Who is Atul Singh's manager?",
+        "Where does Dave live?",
+        "Which team is John on?",
+        "What is Angie's current role?",
+    ):
+        plan = AdaptivePlanner().plan(query)
+
+        assert plan.primary_route is RetrievalRoute.L1, query
+        assert not plan.predicate_hint_guessed, query
+        assert plan.requires_conflict_check, query
+
+
+def test_a_yes_no_question_is_not_answered_by_a_label_value() -> None:
+    plan = AdaptivePlanner().plan("Does James live in Connecticut?")
+
+    assert plan.predicate_hint == "LOCATED_IN"
+    assert plan.predicate_hint_guessed
+
+
+def _guessed_label_plan(query: str) -> RetrievalPlan:
+    return RetrievalPlan(
+        query=query,
+        intent="current_fact",
+        primary_route="L1",
+        routes=["L1", "L2", "L4"],
+        predicate_hint="MEMBER_OF",
+        predicate_hint_guessed=True,
+    )
+
+
+def test_a_guessed_label_fact_does_not_end_the_search_before_discovery() -> None:
+    label_fact = _verified(claim_id="c1", subject_id="entity-john", predicate="MEMBER_OF",
+                           object_value="hiking club", text="John is a member of a hiking club.")
+
+    assessment = EvidenceGate().assess(
+        _guessed_label_plan("How does John say his team handles tough opponents?"),
+        [label_fact],
+        attempted_routes=[RetrievalRoute.L1],
+    )
+
+    assert assessment.state is AnswerabilityState.PARTIALLY_ANSWERABLE
+    assert assessment.can_escalate
+    assert assessment.next_route is RetrievalRoute.L2
+
+
+def test_found_memories_join_guessed_label_facts_after_discovery() -> None:
+    label_fact = _verified(claim_id="c1", subject_id="entity-john", predicate="MEMBER_OF",
+                           object_value="hiking club", text="John is a member of a hiking club.")
+    memory = _verified(claim_id=None, predicate=None,
+                       text="John said his team handles tough opponents by backing each other up.")
+    unrelated = _verified(claim_id=None, predicate=None, text="Maria baked bread on Sunday.")
+
+    assessment = EvidenceGate().assess(
+        _guessed_label_plan("How does John say his team handles tough opponents?"),
+        [memory, unrelated, label_fact],
+        attempted_routes=[RetrievalRoute.L1, RetrievalRoute.L2],
+    )
+
+    assert assessment.state is AnswerabilityState.ANSWERABLE
+    assert [row.content for row in assessment.verified_evidence] == [
+        "John is a member of a hiking club.",
+        "John said his team handles tough opponents by backing each other up.",
+    ]
+
+
+class GuessedLabelRepository:
+    """L1 holds John's team label; only memory discovery finds the answer."""
+
+    def __init__(self) -> None:
+        self.calls: list[RetrievalRoute] = []
+
+    def retrieve(self, *, route: RetrievalRoute, **kwargs: Any) -> list[dict[str, Any]]:
+        del kwargs
+        self.calls.append(route)
+        if route is RetrievalRoute.L1:
+            return [
+                _canonical_claim(memory_id="memory-john", claim_id="claim-team",
+                                 subject_id="entity-john", subject_name="John",
+                                 predicate="MEMBER_OF", object_value="hiking club",
+                                 text="John is a member of a hiking club.")
+            ]
+        return []
+
+    def hydrate(self, **_kwargs: Any) -> list[dict[str, Any]]:
+        return [
+            _canonical_claim(memory_id="memory-episode", claim_id=None, predicate=None,
+                             text="John said his team handles tough opponents by "
+                                  "backing each other up.")
+        ]
+
+
+class EpisodeDiscovery:
+    def vector_search(self, *_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+        return [{"memory_id": "memory-episode", "score": 0.9}]
+
+
+def test_a_guessed_label_is_answered_by_the_model_after_memory_discovery() -> None:
+    frontier = RecordingFrontier()
+
+    result = run_query(
+        _context(GuessedLabelRepository(), frontier, neo=EpisodeDiscovery()),
+        session_id=None,
+        query="How does John say his team handles tough opponents?",
+    )
+
+    assert result.retrieval_metadata.routes_attempted == ["L1", "L2"]
+    assert result.retrieval_metadata.answer_mode != "deterministic-canonical"
+    assert result.answer == "verified answer"
+    assert "hiking club" in frontier.calls[0]
+    assert "backing each other up" in frontier.calls[0]

@@ -106,6 +106,13 @@ _PREDICATE_HINTS: tuple[tuple[tuple[str, ...], str], ...] = (
     (("live", "lives", "located", "location", "move", "moved", "city"), "LOCATED_IN"),
 )
 
+# Words that may appear in a question asking only for a label's value
+# ("Which team is John on?") besides names, label keywords and stop words.
+_LABEL_QUESTION_WORDS = {"who", "what", "where", "which", "when"}
+_LABEL_FILLER_WORDS = {
+    "which", "do", "are", "were", "s", "his", "her", "their", "he", "she", "they"
+}
+
 _IDENTITY_PROFILE_QUERY = re.compile(
     r"^\s*who(?:\s+is|'s)\s+"
     r"([A-Za-z][A-Za-z0-9_-]*(?:\s+[A-Za-z][A-Za-z0-9_-]*){0,2})"
@@ -309,6 +316,18 @@ class AdaptivePlanner:
             route = RetrievalRoute.L2
             reason = "unknown semantic memory requires discovery"
 
+        # A keyword such as "team" or "job" in a question that asks for more
+        # than that fact ("When did Jon lose his job?") is only a guess at the
+        # label; such a question must still search the memories.
+        label_guessed = (
+            intent is RetrievalIntent.CURRENT_FACT
+            and predicate is not None
+            and not asks_current
+            and not _asks_only_for_label(lowered, entities, predicate)
+        )
+        if label_guessed:
+            reason = "label guessed from a keyword; memory discovery still required"
+
         if route is RetrievalRoute.L1:
             routes = [RetrievalRoute.L1, RetrievalRoute.L2, RetrievalRoute.L4]
         elif route is RetrievalRoute.L2:
@@ -330,11 +349,15 @@ class AdaptivePlanner:
             routes=routes,
             entity_hints=entities,
             predicate_hint=predicate,
+            predicate_hint_guessed=label_guessed,
             temporal_scope=temporal,
             requires_evidence=asks_evidence,
+            # Inferred conflicts concern the current value of the asked label;
+            # a guessed label is not asked for, so only stored conflicts count.
             requires_conflict_check=(
                 intent
                 in {RetrievalIntent.CURRENT_FACT, RetrievalIntent.HISTORY, RetrievalIntent.EVIDENCE}
+                and not label_guessed
             ),
             max_candidates=self.max_candidates,
             allow_escalation=True,
@@ -415,6 +438,34 @@ def _predicate_hint(lowered_query: str) -> str | None:
         if any(re.search(rf"\b{re.escape(term)}\b", lowered_query) for term in terms):
             return normalize_predicate(predicate).canonical_predicate
     return None
+
+
+def _asks_only_for_label(lowered_query: str, entities: list[str], predicate: str) -> bool:
+    """Return whether the question asks for the label's value and nothing else.
+
+    "Who is Atul Singh's manager?" asks for the label; "How does John say his
+    team handles tough opponents?" merely mentions it. A yes/no question
+    ("Does James live in Connecticut?") is not answered by stating a value.
+    """
+
+    words = re.findall(r"[a-z0-9]+", lowered_query)
+    if not words or words[0] not in _LABEL_QUESTION_WORDS:
+        return False
+    named = {word for entity in entities for word in re.findall(r"[a-z0-9]+", entity.casefold())}
+    keywords = {
+        word
+        for terms, label in _PREDICATE_HINTS
+        if normalize_predicate(label).canonical_predicate == predicate
+        for term in terms
+        for word in term.split()
+    }
+    return all(
+        word in _STOP_ENTITY_WORDS
+        or word in _LABEL_FILLER_WORDS
+        or word in named
+        or word in keywords
+        for word in words
+    )
 
 
 def _extract_entities(query: str) -> list[str]:

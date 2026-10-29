@@ -106,11 +106,29 @@ class EvidenceGate:
             for row in evidence
         ]
         next_route = _next_route(plan, attempted_routes)
+        discovery_pending = False
         if plan.predicate_hint:
             exact = [
                 row for row in verified if _predicate_matches(row.predicate, plan.predicate_hint)
             ]
-            if exact or (plan.allow_escalation and next_route is not None):
+            if exact and plan.predicate_hint_guessed:
+                # The label is only a keyword guess, so a fact carrying it may
+                # answer a different question. Put those facts first, keep the
+                # found memories that match the question, and do not call the
+                # evidence sufficient before memory discovery has run.
+                labelled = {id(row) for row in exact}
+                verified = [
+                    *exact,
+                    *(
+                        row
+                        for row in verified
+                        if id(row) not in labelled and _query_covered(plan.query, row)
+                    ),
+                ]
+                discovery_pending = plan.allow_escalation and _route_pending(
+                    plan, attempted_routes, RetrievalRoute.L2
+                )
+            elif exact or (plan.allow_escalation and next_route is not None):
                 # While a route that may hold the exact fact remains, an exact
                 # predicate query must not become answerable from an unrelated
                 # claim or a whole-memory body.
@@ -156,6 +174,9 @@ class EvidenceGate:
                 ]
                 if without_provenance:
                     missing.append("provenance/evidence")
+
+            if discovery_pending:
+                missing.append("memory discovery")
 
             if missing:
                 state = AnswerabilityState.PARTIALLY_ANSWERABLE
@@ -383,16 +404,24 @@ def _missing_label(plan: RetrievalPlan) -> str:
     return "canonical memory evidence"
 
 
+def _attempted_values(attempted: Sequence[RetrievalRoute | str]) -> set[str]:
+    return {str(route.value if isinstance(route, RetrievalRoute) else route) for route in attempted}
+
+
 def _next_route(
     plan: RetrievalPlan, attempted: Sequence[RetrievalRoute | str]
 ) -> RetrievalRoute | None:
-    attempted_values = {
-        str(route.value if isinstance(route, RetrievalRoute) else route) for route in attempted
-    }
+    attempted_values = _attempted_values(attempted)
     for route in plan.routes:
         if route.value not in attempted_values:
             return route
     return None
+
+
+def _route_pending(
+    plan: RetrievalPlan, attempted: Sequence[RetrievalRoute | str], route: RetrievalRoute
+) -> bool:
+    return route in plan.routes and route.value not in _attempted_values(attempted)
 
 
 def _unique(values: Iterable[str]) -> list[str]:

@@ -1593,6 +1593,8 @@ def _deterministic_current_answer(
         or plan.temporal_scope.kind is not TemporalKind.CURRENT
         or plan.requires_evidence
         or not plan.predicate_hint
+        # A fixed sentence about a guessed label answers a different question.
+        or plan.predicate_hint_guessed
     ):
         return None
     predicate = normalize_predicate(plan.predicate_hint).canonical_predicate

@@ -104,6 +104,10 @@ class RetrievalPlan(BaseModel):
     routes: list[RetrievalRoute] = Field(default_factory=list, max_length=4)
     entity_hints: list[str] = Field(default_factory=list, max_length=16)
     predicate_hint: str | None = Field(default=None, max_length=128)
+    # True when predicate_hint is only guessed from a keyword in a question
+    # that asks for something more ("How does John say his team handles tough
+    # opponents?"): the label orders evidence but never ends the search alone.
+    predicate_hint_guessed: bool = False
     temporal_scope: TemporalScope = Field(default_factory=TemporalScope)
     requires_evidence: bool = False
     requires_conflict_check: bool = False
