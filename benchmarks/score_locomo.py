@@ -21,6 +21,10 @@ prompt accepts "right topic, wrong specifics" answers.
     python benchmarks/score_locomo.py benchmarks/results/locomo-<run>
     python benchmarks/score_locomo.py benchmarks/results/locomo-<run> --judge --workers 6
 
+Grades from two judge models must never be compared or mixed. When the judge
+model differs from the one that graded a run, add --rejudge-strict (re-grades
+every strict verdict) and write to a new --out directory.
+
 Needs nltk (Porter stemmer and BLEU): pip install nltk
 """
 
@@ -158,17 +162,41 @@ def print_summary(s: dict, judge_model: str | None) -> None:
         print(f"  ! {s['j_mem0_failures']} J judge failure(s) — re-run with --judge to retry them")
 
 
+def run_judge_models(runs: list[str]) -> set[str]:
+    """Judge models that wrote the strict verdicts of these runs (from summary.json)."""
+    models: set[str] = set()
+    for run in runs:
+        path = Path(run)
+        summary = (path if path.is_dir() else path.parent) / "summary.json"
+        if summary.is_file():
+            config = json.loads(summary.read_text(encoding="utf-8")).get("config") or {}
+            if config.get("judge_model"):
+                models.add(config["judge_model"])
+    return models
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description="Re-score saved LoCoMo answers (F1, BLEU-1, J).")
     p.add_argument("runs", nargs="+", help="run directories (or rows.jsonl files) to score")
     p.add_argument("--judge", action="store_true",
                    help="also compute J with the Mem0 prompt (one model call per question)")
     p.add_argument("--judge-model", default=DEFAULT_MODEL)
+    p.add_argument("--rejudge-strict", action="store_true",
+                   help="with --judge: re-grade every strict verdict, not only failures "
+                        "(needed when the run was graded by another judge model)")
     p.add_argument("--workers", type=int, default=6, help="parallel judge calls")
     p.add_argument("--out", default=None,
                    help="output directory (default: the first run directory)")
     args = p.parse_args()
     load_env_file()
+
+    if args.judge and not args.rejudge_strict:
+        older = run_judge_models(args.runs) - {args.judge_model}
+        if older:
+            print(f"strict verdicts in these runs were graded by {', '.join(sorted(older))}, "
+                  f"not {args.judge_model}; add --rejudge-strict (and a new --out) so every "
+                  "grade comes from one judge", file=sys.stderr)
+            return 2
 
     rows = load_rows(args.runs)
     if not rows:
@@ -178,18 +206,21 @@ def main() -> int:
                                 else Path(args.runs[0]).parent))
     scored_path = out_dir / "scored.jsonl"
 
-    # Reuse earlier J verdicts (resume) when the same answer was already judged.
+    # Reuse earlier verdicts (resume) when the same answer was already judged by
+    # the same judge model; verdicts of another judge model are ignored.
     cache: dict[tuple, dict] = {}
     if scored_path.exists():
         for line in scored_path.read_text(encoding="utf-8").splitlines():
             old = json.loads(line)
-            cache[(old["sample_id"], old["q_idx"], old["predicted"])] = old
+            if old.get("judge_model") == args.judge_model:
+                cache[(old["sample_id"], old["q_idx"], old["predicted"])] = old
 
     for r in rows:
         r["f1"] = locomo_f1(r["predicted"], r["gold"], int(r["category"]))
         r["bleu1"] = bleu1(r["predicted"], r["gold"])
         old = cache.get((r["sample_id"], r["q_idx"], r["predicted"]), {})
-        for key in ("j_mem0", "j_mem0_reason", "j_mem0_failed", "strict_rejudged"):
+        for key in ("j_mem0", "j_mem0_reason", "j_mem0_failed", "strict_rejudged",
+                    "judge_model"):
             if key in old:
                 r[key] = old[key]
         if old.get("strict_rejudged"):
@@ -199,9 +230,10 @@ def main() -> int:
         with OpenCodeJudge(model=args.judge_model) as judge:
             todo = [r for r in rows if r["category_name"] in STANDARD_CATEGORIES
                     and (r.get("j_mem0") is None or r.get("j_mem0_failed"))]
-            retry = [r for r in rows if r.get("judged") is False]
-            print(f"J (Mem0 prompt): {len(todo)} to judge; strict re-judge of "
-                  f"{len(retry)} earlier judge failure(s)")
+            retry = [r for r in rows if r.get("judged") is False
+                     or (args.rejudge_strict and not r.get("strict_rejudged"))]
+            print(f"J (Mem0 prompt, {args.judge_model}): {len(todo)} to judge; strict re-judge "
+                  f"of {len(retry)} answer(s)")
 
             def run_j(r: dict) -> None:
                 res = judge.judge_mem0(question=r["question"], gold_answer=str(r["gold"]),
@@ -209,6 +241,7 @@ def main() -> int:
                 r["j_mem0"] = res.correct if res.judged else None
                 r["j_mem0_reason"] = res.reason
                 r["j_mem0_failed"] = not res.judged
+                r["judge_model"] = args.judge_model
 
             def run_strict(r: dict) -> None:
                 res = judge.judge(question=r["question"], gold_answer=str(r["gold"]),
@@ -217,6 +250,10 @@ def main() -> int:
                 if res.judged:
                     r["correct"], r["judged"], r["judge_reason"] = res.correct, True, res.reason
                     r["strict_rejudged"] = True
+                    r["judge_model"] = args.judge_model
+                elif args.rejudge_strict:
+                    # An old judge's verdict must not stand in for a failed re-grade.
+                    r["correct"], r["judged"], r["judge_reason"] = False, False, res.reason
 
             with ThreadPoolExecutor(max_workers=args.workers) as pool:
                 futures = [pool.submit(run_j, r) for r in todo]
