@@ -204,6 +204,7 @@ def main() -> int:
         return 1
     out_dir = Path(args.out or (args.runs[0] if Path(args.runs[0]).is_dir()
                                 else Path(args.runs[0]).parent))
+    out_dir.mkdir(parents=True, exist_ok=True)
     scored_path = out_dir / "scored.jsonl"
 
     # Reuse earlier verdicts (resume) when the same answer was already judged by
