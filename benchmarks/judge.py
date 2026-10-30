@@ -4,12 +4,13 @@ LoCoMo answers are free-form ("Psychology, counseling certification"), so a
 string match cannot decide correctness -- Engram may phrase the same fact
 completely differently. We ask a model to grade semantic equivalence instead.
 
-Judge model: MiMo-V2.5 via OpenCode Zen Go's Chat Completions endpoint, at
-temperature 0 so the same answer is always graded the same way. It is the
-judge used for the old architecture's 48.7% baseline; keep it fixed for every
-new-architecture run. (Engram's own Muse Spark only accepts temperature 1,
-which would add grading noise.) Kept dependency-free of Engram internals so
-the harness runs on its own.
+Judge model: MiMo-V2.6-Flash via OpenCode Zen Go's Chat Completions endpoint,
+at temperature 0 so the same answer is always graded the same way. OpenCode
+retired MiMo-V2.5 (the judge of every run before 2026-10-30) and named this
+one its replacement. Never compare grades from two judge models: re-grade the
+older run with ``score_locomo.py --judge --rejudge-strict`` first. (Engram's
+own Muse Spark only accepts temperature 1, which would add grading noise.)
+Kept dependency-free of Engram internals so the harness runs on its own.
 
 Two grading modes:
 
@@ -32,7 +33,7 @@ from dataclasses import dataclass
 import httpx
 
 DEFAULT_BASE = "https://opencode.ai/zen/go/v1"
-DEFAULT_MODEL = "mimo-v2.5"
+DEFAULT_MODEL = "mimo-v2.6-flash"
 # The new stack names the OpenCode key OPENCODE_GO_API_KEY; the old one used
 # OPENCODE_API_KEY. Either works — it is the same OpenCode Zen Go key.
 API_KEY_ENVS = ("OPENCODE_GO_API_KEY", "OPENCODE_API_KEY")
