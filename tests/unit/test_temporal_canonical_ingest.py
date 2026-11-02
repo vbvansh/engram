@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import os
 import uuid
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
 
+from engram.ingest.worker import _call_extract, _spoken_on, _turn_pair
+from engram.predicate_registry import normalize_extracted_triplets
 from engram.storage.memory_repository import MemoryRepository
 from engram.temporal import activities
 from engram.temporal.activities import (
@@ -502,8 +505,8 @@ def test_empty_profile_extraction_uses_reversible_recovery(monkeypatch):
     )
     calls: list[dict[str, str]] = []
 
-    def fake_extract(_context, turn_pair, *, session_context):
-        del session_context
+    def fake_extract(_context, turn_pair, *, session_context, spoken_on=None):
+        del session_context, spoken_on
         calls.append(turn_pair)
         if "personal profile entry" in "\n".join(turn_pair.values()).lower():
             raise activities.CoreModelError("could not parse JSON from model output: ''")
@@ -575,8 +578,8 @@ def test_profile_retry_skips_known_empty_primary_prompt(monkeypatch):
     )
     calls: list[dict[str, str]] = []
 
-    def fake_extract(_context, turn_pair, *, session_context):
-        del _context, turn_pair, session_context
+    def fake_extract(_context, turn_pair, *, session_context, spoken_on=None):
+        del _context, turn_pair, session_context, spoken_on
         raise AssertionError("a retried profile event must skip the known-empty primary prompt")
 
     monkeypatch.setattr(activities, "get_state", lambda: state)
@@ -681,3 +684,122 @@ def test_profile_repeat_reuses_exact_session_extraction_without_model(monkeypatc
     assert artifact.payload["recovery_policy"] == "same-session-profile-signature-v1"
     assert artifact.payload["reused_from_event_id"] == source_event
     assert "chapter 2" in artifact.payload["resolved_text"]
+
+
+class _PromptRecordingCore:
+    def __init__(self, output):
+        self.output = output
+        self.prompts: list[str] = []
+
+    def complete(self, **kwargs):
+        self.prompts.append(kwargs["system_prompt"])
+        return SimpleNamespace(output=self.output, raw_text="")
+
+
+def _support_group_payload(timestamp: str | None) -> dict:
+    user = {"content": "Caroline: I went to an LGBTQ support group yesterday."}
+    if timestamp is not None:
+        user["timestamp"] = timestamp
+    return {"turn_pair": {"user": user, "assistant": {"content": "Melanie: That's great!"}}}
+
+
+def test_extractor_is_told_the_day_the_turn_was_said():
+    core = _PromptRecordingCore({"resolved_text": "x", "l0_abstract": "x", "triplets": []})
+    payload = _support_group_payload("2023-05-08T13:56:00")
+
+    _call_extract(
+        SimpleNamespace(core=core),
+        _turn_pair(payload),
+        session_context=None,
+        spoken_on=_spoken_on(payload),
+    )
+
+    assert "This turn was said on Monday, 8 May 2023." in core.prompts[0]
+    assert "Turn pair (said on Monday, 8 May 2023):" in core.prompts[0]
+
+
+def test_without_a_usable_timestamp_relative_times_stay_as_written():
+    core = _PromptRecordingCore({"resolved_text": "x", "l0_abstract": "x", "triplets": []})
+    payload = _support_group_payload("last Tuesday")
+
+    assert _spoken_on(payload) is None
+    assert _spoken_on(_support_group_payload(None)) is None
+    _call_extract(SimpleNamespace(core=core), _turn_pair(payload), session_context=None)
+
+    assert "This turn was said on an unknown date." in core.prompts[0]
+
+
+def test_unusable_model_dates_are_dropped_instead_of_failing_the_message():
+    core = _PromptRecordingCore(
+        {
+            "resolved_text": "x",
+            "l0_abstract": "x",
+            "triplets": [
+                {"subject": "Caroline", "relation": "visited", "object": "support group",
+                 "valid_from": "2023-05-07"},
+                {"subject": "Melanie", "relation": "plans", "object": "camping",
+                 "valid_from": "June 2023"},
+                {"subject": "Melanie", "relation": "ran", "object": "charity race",
+                 "valid_from": "2023-05-21", "valid_until": "2023-05-01"},
+            ],
+        }
+    )
+
+    out = _call_extract(
+        SimpleNamespace(core=core), {"user": "u", "assistant": "a"}, session_context=None
+    )
+
+    first, vague, backwards = out["triplets"]
+    assert first["valid_from"] == "2023-05-07"
+    assert "valid_from" not in vague
+    assert backwards["valid_from"] == "2023-05-21" and "valid_until" not in backwards
+    # The typed-claim stage, which rejects unparseable dates, accepts what is left.
+    assert len(normalize_extracted_triplets(out["triplets"])) == 3
+
+
+def _commit_support_group(repository, store, timestamp: str | None) -> list:
+    event_id, created = store.record_event(
+        pair_id=f"canonical-said-on-{uuid.uuid4()}",
+        session_id="session-said-on",
+        source="test",
+        event_type="INGEST",
+        payload=_support_group_payload(timestamp),
+        tenant_id="tenant-canonical",
+    )
+    assert created
+    result = repository.commit_conversational_event(
+        event_id=event_id,
+        tenant_id="tenant-canonical",
+        gate={"store": True},
+        extraction={
+            "resolved_text": "Caroline went to an LGBTQ support group yesterday (7 May 2023).",
+            "l0_abstract": "Caroline went to an LGBTQ support group on 7 May 2023.",
+            "triplets": [
+                {"subject": "Caroline", "relation": "visited", "object": "LGBTQ support group",
+                 "valid_from": "2023-05-07"}
+            ],
+        },
+    )
+    node_id = uuid.UUID(result["entity_ids"][0])
+    claims = repository.get_claim_history(node_id, tenant_id="tenant-canonical")
+    versions = repository.get_versions(node_id, tenant_id="tenant-canonical")
+    return [*claims, *versions]
+
+
+def test_facts_are_stamped_with_the_day_they_were_said():
+    repository, store = _repository()
+
+    stamped = _commit_support_group(repository, store, "2023-05-08T13:56:00")
+
+    said = datetime(2023, 5, 8, 13, 56, tzinfo=timezone.utc)
+    assert stamped and all(item.asserted_at == said for item in stamped)
+    assert stamped[0].valid_from == datetime(2023, 5, 7, tzinfo=timezone.utc)
+
+
+def test_without_a_turn_timestamp_facts_keep_the_storage_time():
+    repository, store = _repository()
+
+    stamped = _commit_support_group(repository, store, None)
+
+    now = datetime.now(timezone.utc)
+    assert stamped and all(abs(item.asserted_at - now) < timedelta(minutes=10) for item in stamped)

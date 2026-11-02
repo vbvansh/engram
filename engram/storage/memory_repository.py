@@ -653,6 +653,19 @@ def _datetime(value: Any, *, default: datetime | None = None) -> datetime | None
     return parsed
 
 
+def _turn_said_at(*turns: Any) -> datetime | None:
+    """The first parseable client timestamp of the given turns, if any."""
+    for turn in turns:
+        raw = turn.get("timestamp") if isinstance(turn, Mapping) else None
+        if not raw:
+            continue
+        try:
+            return _datetime(str(raw).strip())
+        except ValueError:
+            continue
+    return None
+
+
 def _required_datetime(value: Any) -> datetime:
     parsed = _datetime(value, default=datetime.now(timezone.utc))
     assert parsed is not None
@@ -1515,7 +1528,11 @@ class MemoryRepository:
                 raise ValueError("canonical extraction produced an empty conversation body")
             abstract = str(extraction_payload.get("l0_abstract") or body[:200])
             extractor_version = str(extraction_payload.get("extractor_version") or "core-v2")
-            asserted_at = _datetime(event_row.get("created_at"), default=datetime.now(timezone.utc))
+            # A fact is asserted when it was said, not when it was stored; the
+            # storage time is the fallback for clients that send no timestamp.
+            asserted_at = _turn_said_at(user_turn, assistant_turn) or _datetime(
+                event_row.get("created_at"), default=datetime.now(timezone.utc)
+            )
 
             bound = MemoryRepository(
                 _BoundTransactionStore(conn, projection_task_queue=self.projection_task_queue),

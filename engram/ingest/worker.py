@@ -20,7 +20,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any
 
 from slugify import slugify
@@ -150,7 +150,10 @@ def _process_event(ctx: IngestContext, event_id: str, event: dict[str, Any]) -> 
         existing = ctx.control_plane.get_extraction(event_id)
         if existing is None:
             extraction = _call_extract(
-                ctx, turn_pair, session_context=payload.get("session_context")
+                ctx,
+                turn_pair,
+                session_context=payload.get("session_context"),
+                spoken_on=_spoken_on(payload),
             )
             ctx.control_plane.save_extraction(
                 event_id=event_id,
@@ -258,6 +261,51 @@ def _turn_pair(payload: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def _spoken_on(payload: dict[str, Any]) -> datetime | None:
+    """When the pair was said: the user turn's timestamp, else the assistant's.
+
+    Clients send it as an ISO-8601 string; anything unparseable counts as an
+    unknown date, so relative times are then left as written.
+    """
+    tp = payload.get("turn_pair") or payload.get("turn_group") or payload
+    for key in ("user", "assistant"):
+        turn = tp.get(key) if isinstance(tp, dict) else None
+        raw = turn.get("timestamp") if isinstance(turn, dict) else None
+        if not raw:
+            continue
+        try:
+            said = datetime.fromisoformat(str(raw).strip().replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        return said if said.tzinfo else said.replace(tzinfo=timezone.utc)
+    return None
+
+
+def _clean_event_dates(triplets: Any) -> Any:
+    """Drop model-written dates that are not ISO days instead of failing the turn.
+
+    The typed-claim stage rejects an unparseable date, which would lose every
+    fact of the message; a fact without a date is still worth keeping.
+    """
+    if not isinstance(triplets, list):
+        return triplets
+    for trip in triplets:
+        if not isinstance(trip, dict):
+            continue
+        for key in ("valid_from", "valid_until", "asserted_at"):
+            value = trip.get(key)
+            if value is None:
+                continue
+            try:
+                trip[key] = date.fromisoformat(str(value).strip()[:10]).isoformat()
+            except ValueError:
+                trip.pop(key)
+        start, end = trip.get("valid_from"), trip.get("valid_until")
+        if start and end and end <= start:
+            trip.pop("valid_until")
+    return triplets
+
+
 def _call_gate(
     ctx: IngestContext, turn_pair: dict[str, str], *, session_summary: str | None
 ) -> dict:
@@ -272,9 +320,19 @@ def _call_gate(
 
 
 def _call_extract(
-    ctx: IngestContext, turn_pair: dict[str, str], *, session_context: str | None
+    ctx: IngestContext,
+    turn_pair: dict[str, str],
+    *,
+    session_context: str | None,
+    spoken_on: datetime | None = None,
 ) -> dict:
-    prompt = prompts.render("extract", turn_pair=turn_pair, session_context=session_context)
+    prompt = prompts.render(
+        "extract",
+        turn_pair=turn_pair,
+        session_context=session_context,
+        # "Monday, 8 May 2023": the weekday lets "last Saturday" be anchored.
+        spoken_on=f"{spoken_on:%A}, {spoken_on.day} {spoken_on:%B %Y}" if spoken_on else None,
+    )
     result = ctx.core.complete(
         system_prompt=prompt,
         user_prompt="Respond with a JSON object matching the schema.",
@@ -285,6 +343,7 @@ def _call_extract(
     out.setdefault("resolved_text", turn_pair["assistant"])
     out.setdefault("triplets", [])
     out.setdefault("l0_abstract", turn_pair["assistant"][:200])
+    out["triplets"] = _clean_event_dates(out["triplets"])
     return out
 
 

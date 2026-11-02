@@ -23,7 +23,13 @@ from engram.consolidation.worker import (
 )
 from engram.decay import run_daily
 from engram.deps import get_state, make_ingest_context
-from engram.ingest.worker import _call_extract, _call_gate, _turn_pair, process_event
+from engram.ingest.worker import (
+    _call_extract,
+    _call_gate,
+    _spoken_on,
+    _turn_pair,
+    process_event,
+)
 from engram.models.core import CoreModelError
 from engram.models.request_context import model_request_session
 from engram.predicate_registry import normalize_extracted_triplets
@@ -1052,6 +1058,7 @@ def canonical_extract_activity(event_id: str, tenant_id: str | None = None) -> s
                             cast(Any, model_context),
                             turn_pair,
                             session_context=payload.get("session_context"),
+                            spoken_on=_spoken_on(dict(payload)),
                         )
                 except CoreModelError as err:
                     if _EMPTY_MODEL_OUTPUT not in str(err) or not profile_recovery_applicable:
@@ -1068,7 +1075,8 @@ def canonical_extract_activity(event_id: str, tenant_id: str | None = None) -> s
                 type="InvalidCanonicalArtifact",
                 non_retryable=True,
             )
-        extractor_version = str(extraction.get("extractor_version") or "extract-v2")
+        # v3: the extractor sees the day the turn was said and resolves relative times.
+        extractor_version = str(extraction.get("extractor_version") or "extract-v3")
         if existing_extraction is None:
             _store_canonical_artifact(
                 repository,

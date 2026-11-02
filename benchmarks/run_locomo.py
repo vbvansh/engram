@@ -100,10 +100,9 @@ def _dated(turn) -> str:
     """Turn text with an absolute date anchor prepended.
 
     LoCoMo utterances use relative time ("yesterday", "last year") and the real
-    date lives only in the session timestamp. The canonical extractor receives
-    no date, but this prefix survives in the stored conversation text, which
-    lets the answer model resolve "yesterday" (the smoke test answered
-    "7 May 2023" correctly this way).
+    date lives only in the session timestamp. The extractor resolves relative
+    times from the turn `timestamp` sent with each pair; this prefix keeps the
+    date in the raw conversation text as well.
     """
     if turn.timestamp:
         return f"[{turn.timestamp}] {turn.attributed()}"

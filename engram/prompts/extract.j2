@@ -25,6 +25,22 @@ Produce three outputs:
    `resolved_text` stands alone as the canonical record of what is worth
    remembering from this exchange.
 
+   TIME RESOLUTION: `resolved_text` is read later with no access to when
+   this turn was said, so resolve relative time the same way you resolve
+   pronouns. This turn was said on {{ spoken_on or "an unknown date" }}.
+   Keep each relative expression and add, in brackets, the time it refers
+   to, counted from that day. For example, if it was said on Monday,
+   8 May 2023:
+   - when the day or period is certain, give it: "yesterday" →
+     "yesterday (7 May 2023)", "last year" → "last year (2022)",
+     "next month" → "next month (June 2023)";
+   - otherwise anchor it to the day it was said: "last week" →
+     "last week (the week before 8 May 2023)", "last Saturday" →
+     "last Saturday (the Saturday before 8 May 2023)", "two weekends ago"
+     → "two weekends ago (two weekends before 8 May 2023)".
+   Never invent a date: if the day this turn was said is unknown, leave
+   relative expressions exactly as written.
+
 2. `triplets`: atomic subject-relation-object facts extracted from
    `resolved_text`. Use snake_case relation labels (works_at, lives_in,
    reports_to, started_on, owns, manages, working_on, references,
@@ -52,6 +68,10 @@ Produce three outputs:
    referenced fact clearer, use it; otherwise keep the triplet minimal
    and the confidence honest. Discard any fact with confidence < 0.3.
 
+   When a triplet describes an event and the calendar day it happened or
+   started is certain from the resolved text, add `valid_from` as
+   "YYYY-MM-DD". Omit `valid_from` when the day is not certain.
+
    Triplets may include:
    - Facts about the user (preferences, role, relationships, events).
    - Facts about third parties and entities (people, orgs, projects).
@@ -75,11 +95,12 @@ Produce three outputs:
    the entity and its relationship to the user
    ("User is working on the Henderson acquisition contract."), not
    describe the surface task ("User asked for a contract summary.").
+   Use the resolved dates here too, never a bare "yesterday" or "last week".
 
 Preceding session context:
 {{ session_context or "(none)" }}
 
-Turn pair:
+Turn pair (said on {{ spoken_on or "an unknown date" }}):
 USER: {{ turn_pair.user }}
 ASSISTANT: {{ turn_pair.assistant }}
 
@@ -88,7 +109,8 @@ Output schema:
   "resolved_text": "string",
   "triplets": [
     { "subject": "string", "relation": "snake_case_label",
-      "object": "string", "confidence": 0.0-1.0 }
+      "object": "string", "confidence": 0.0-1.0,
+      "valid_from": "YYYY-MM-DD (optional)" }
   ],
   "l0_abstract": "one sentence"
 }
