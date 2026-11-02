@@ -11,7 +11,7 @@ and how to fix each one. The numbers come from that test.
 | 1 | Found memories are thrown away | 149 questions, all answered wrong | Keep found memories when their label does not match — **fixed** (see result below) |
 | 2 | False "conflicting evidence" alarms | 95 questions, all answered wrong | Only call it a conflict for facts that can have one value — **fixed** (see result below) |
 | 3 | Dates stay as "last week" | Date questions: only 24% correct | Turn relative times into real dates when storing |
-| 4 | Facts get wrong or vague labels | Feeds problem 1; template answers only 10% correct | A label list for everyday life, fixed synonyms |
+| 4 | Facts get wrong or vague labels | Feeds problem 1; template answers only 10% correct | Keep searching after a guessed label — **template answers fixed** (see result below); a label list for everyday life, fixed synonyms |
 | 5 | Other users' memories crowd out search results | Search missed 8.5% of the right memories; no score change | Filter by user inside the search, not after it — **fixed** (see result below) |
 | 6 | Messages are stored without their context | Not yet measured | Send earlier turns; don't drop a whole message |
 
@@ -151,6 +151,31 @@ game_convention and convention." for "When did Nate attend a cooking show?".
 - Fix wrong synonyms ("attended an event" is not "attends school").
 - Group similar labels so they count as the same (has favourite colour =
   prefers).
+
+**Result — template answers fixed.** A label guessed from one keyword in the
+question ("team", "job", "city") no longer ends the search at the first step.
+Engram keeps searching, and the answer model writes the answer from the facts
+with that label plus the other memories it found. Questions that ask only for
+the label ("Where does Dave live?", "Which team is John on?") keep the fast
+lookup. The labels themselves are not changed yet. Measured on all questions,
+compared one by one with the run after fix 3. Both runs were graded by the new
+judge model (the old one was retired), so these numbers are not comparable with
+the tables above. 42 answers lost to dropped connections were asked again.
+
+| | Before | After |
+|---|---|---|
+| Template answers | 59 | 0 |
+| The 176 affected questions answered correctly | 68 | 106 (+38, not luck) |
+| Strict score (1,540 questions) | 45.6% | 47.1% (+1.5, could be luck) |
+| J score (1,540 questions) | 57.4% | 59.4% (+2.0, borderline) |
+| Trick (adversarial) questions handled correctly | 61.7% | 62.3% (no change) |
+| Correct answers over all 1,986 questions | 977 | 1,003 (+26) |
+
+The change touches only the 176 questions where the label is guessed; the
+other 1,810 questions run the same code as before and changed by chance (−12).
+Spread over all 1,540 questions the gain is too small to pass the luck test, so
+the fix was kept on the result for the questions it targets, which repeated
+in a separate quick check (105 of 176).
 
 ## 5. Other users' memories crowd out search results
 
