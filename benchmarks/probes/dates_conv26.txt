@@ -1,0 +1,40 @@
+# Problem 3 (dates) quick check: the date (temporal) questions of conv-26, asked
+# against conv-26 stored again with the dated extractor (tenant locomo-dates1-c0).
+# One sample_id:q_idx per line.
+conv-26:0
+conv-26:1
+conv-26:5
+conv-26:6
+conv-26:8
+conv-26:9
+conv-26:10
+conv-26:12
+conv-26:16
+conv-26:17
+conv-26:20
+conv-26:21
+conv-26:25
+conv-26:26
+conv-26:28
+conv-26:29
+conv-26:31
+conv-26:33
+conv-26:35
+conv-26:36
+conv-26:41
+conv-26:44
+conv-26:45
+conv-26:49
+conv-26:53
+conv-26:54
+conv-26:57
+conv-26:58
+conv-26:62
+conv-26:63
+conv-26:67
+conv-26:68
+conv-26:72
+conv-26:73
+conv-26:74
+conv-26:79
+conv-26:80
