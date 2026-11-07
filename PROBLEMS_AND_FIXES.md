@@ -10,7 +10,7 @@ and how to fix each one. The numbers come from that test.
 |---|---|---|---|
 | 1 | Found memories are thrown away | 149 questions, all answered wrong | Keep found memories when their label does not match — **fixed** (see result below) |
 | 2 | False "conflicting evidence" alarms | 95 questions, all answered wrong | Only call it a conflict for facts that can have one value — **fixed** (see result below) |
-| 3 | Dates stay as "last week" | Date questions: only 24% correct | Turn relative times into real dates when storing |
+| 3 | Dates stay as "last week" | Date questions: only 24% correct | Turn relative times into real dates when storing — **fixed** (see result below) |
 | 4 | Facts get wrong or vague labels | Feeds problem 1; template answers only 10% correct | Keep searching after a guessed label — **template answers fixed** (see result below); a label list for everyday life, fixed synonyms |
 | 5 | Other users' memories crowd out search results | Search missed 8.5% of the right memories; no score change | Filter by user inside the search, not after it — **fixed** (see result below) |
 | 6 | Messages are stored without their context | Not yet measured | Send earlier turns; don't drop a whole message |
@@ -128,6 +128,36 @@ causes many of the false conflicts in problem 2.
 - Store that date with each fact ("true from"), and the message time as
   "said at".
 - The conversations must be stored again after this change.
+
+**Result — fixed.** The fact-extraction step now gets the day each message was
+said. It keeps the original words and adds the real date: "yesterday
+(7 May 2023)", "last week (the week before 9 June 2023)". Each fact is stamped
+with the day it was said instead of the day it was stored, and events with a
+clear day also get an event date. All conversations were stored again with
+this change. Measured on all questions, compared one by one with the run after
+fix 4 (same judge); 85 answers lost to dropped connections were asked again.
+
+| | Before | After |
+|---|---|---|
+| Date answers that only say "last week", "next month"… with no year | 92 | 0 |
+| Date questions answered correctly (321) | 104 (32.4%) | 204 (63.6%) |
+| Strict score (1,540 questions) | 47.1% | 52.8% (+5.7, not luck) |
+| J score (1,540 questions) | 59.4% | 62.1% (+2.7, not luck) |
+| Trick (adversarial) questions handled correctly | 62.3% | 57.8% (−4.5, could be luck) |
+| Correct answers over all 1,986 questions | 1,003 | 1,071 (+68) |
+
+**Side effect found.** Questions with "recently" or "lately" (68) got worse:
+the 45 normal ones went from 31 to 6 correct. Engram measures "recently" from
+today's real date, and a fact with an event date but no end date counts as
+still true, so an event from 2023 now passes the "recent" filter. Engram then
+stops searching early and answers from the wrong facts. Next fix: a fact
+counts as recent only if it happened, was said or ended within the recent
+period.
+
+Storing also failed for 1 message of about 2,900: all messages in a session
+now share the session's date, so when a one-value fact changes back and forth
+within one session, two records get the same dates and the database refuses
+the second. To be fixed before the next time conversations are stored again.
 
 ## 4. Facts get wrong or vague labels
 
