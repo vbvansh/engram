@@ -796,6 +796,108 @@ def test_facts_are_stamped_with_the_day_they_were_said():
     assert stamped[0].valid_from == datetime(2023, 5, 7, tzinfo=timezone.utc)
 
 
+def _said_event(store, session_id: str, turn_idx: int, user: str, assistant: str = "") -> str:
+    said = "2023-06-01T10:00:00"
+    event_id, created = store.record_event(
+        pair_id=f"said-{session_id}-{turn_idx}",
+        session_id=session_id,
+        source="test",
+        event_type="INGEST",
+        payload={
+            "turn_pair": {
+                "user": {"content": user, "timestamp": said, "turn_idx": turn_idx},
+                "assistant": {"content": assistant, "timestamp": said, "turn_idx": turn_idx + 1},
+            }
+        },
+        tenant_id="tenant-canonical",
+    )
+    assert created
+    return event_id
+
+
+def test_earlier_turns_of_the_session_are_given_as_context():
+    _, store = _repository()
+    session = f"session-context-{uuid.uuid4()}"
+    first = _said_event(store, session, 0, "Calvin: I bought a vintage camera.", "Dave: Nice!")
+    _said_event(store, session, 2, "Dave: What did you shoot with it?", "Calvin: The harbour.")
+    third = _said_event(store, session, 4, "Calvin: It was at sunset.")
+
+    def context(event_id: str) -> str | None:
+        event = store.get_event(event_id, tenant_id="tenant-canonical")
+        return activities._preceding_turns(store, event, event_id, "tenant-canonical")
+
+    assert context(third) == (
+        "USER: Calvin: I bought a vintage camera.\nASSISTANT: Dave: Nice!\n"
+        "USER: Dave: What did you shoot with it?\nASSISTANT: Calvin: The harbour."
+    )
+    assert context(first) is None
+
+
+def test_extract_activity_hands_the_earlier_turns_to_the_extractor(monkeypatch):
+    repository, store = _repository()
+    session = f"session-handover-{uuid.uuid4()}"
+    _said_event(store, session, 0, "Melanie: We went camping with the kids.")
+    last = _said_event(store, session, 2, "Melanie: It was so relaxing.")
+    repository.record_ingest_artifact(
+        event_id=last,
+        artifact_type="EXTRACTION",
+        artifact_key="gate-v1",
+        payload={"store": True},
+        content=b'{"store": true}',
+        media_type="application/json",
+        tenant_id="tenant-canonical",
+    )
+    state = SimpleNamespace(
+        cfg=object(), core=object(), control_plane=store, memory_repository=repository
+    )
+    seen: dict[str, object] = {}
+
+    def fake_extract(_context, _turn_pair, *, session_context, spoken_on=None):
+        seen["context"], seen["spoken_on"] = session_context, spoken_on
+        return {"resolved_text": "x", "l0_abstract": "x", "triplets": []}
+
+    monkeypatch.setattr(activities, "get_state", lambda: state)
+    monkeypatch.setattr(activities, "_call_extract", fake_extract)
+
+    assert canonical_extract_activity(last, "tenant-canonical") == "READY"
+    assert seen["context"] == "USER: Melanie: We went camping with the kids."
+    assert seen["spoken_on"] == datetime(2023, 6, 1, 10, 0, tzinfo=timezone.utc)
+
+
+def test_one_fact_that_cannot_be_written_does_not_lose_the_message():
+    repository, store = _repository()
+    session = f"session-flip-{uuid.uuid4()}"
+    results = []
+    # Inside one session every turn shares the session's date, so the fourth
+    # move closes the second "Boston" claim with the same interval as the
+    # first one: a duplicate claim fingerprint that used to fail the message.
+    for turn, city in enumerate(("Boston", "Tokyo", "Boston", "Tokyo")):
+        event_id = _said_event(store, session, 2 * turn, f"Calvin: I live in {city} now.")
+        triplets = [{"subject": "Calvin", "relation": "lives_in", "object": city}]
+        if turn == 3:
+            triplets.append({"subject": "Calvin", "relation": "likes", "object": "sushi"})
+        results.append(
+            repository.commit_conversational_event(
+                event_id=event_id,
+                tenant_id="tenant-canonical",
+                gate={"store": True},
+                extraction={
+                    "resolved_text": f"Calvin lives in {city}.",
+                    "l0_abstract": f"Calvin lives in {city}.",
+                    "triplets": triplets,
+                },
+            )
+        )
+
+    last = results[-1]
+    assert last["status"] == "COMPLETE"
+    assert [item["triplet_index"] for item in last["skipped_triplets"]] == [0]
+    assert len(last["claim_ids"]) == 1  # "Calvin likes sushi" is kept
+    event = store.get_event(event_id, tenant_id="tenant-canonical")
+    assert event["status"] == "COMPLETE"
+    assert event["error_message"].startswith("skipped 1 fact(s)")
+
+
 def test_without_a_turn_timestamp_facts_keep_the_storage_time():
     repository, store = _repository()
 

@@ -12,6 +12,7 @@ from typing import Any, cast
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
+from engram import tokens as tok_mod
 from engram.consolidation.reconciliation import (
     ReconciliationContext,
     run_stale_overview_scan,
@@ -51,6 +52,56 @@ _CANONICAL_REPOSITORY_MODULES = (
 _EMPTY_MODEL_OUTPUT = "could not parse JSON from model output: ''"
 _PROFILE_ENTRY_TERM = re.compile(r"\b(?:personal\s+)?profile\s+entr(?:y|ies)\b", re.IGNORECASE)
 _PROFILE_ENTRY_RECOVERY_TERM = "memory test record"
+_CONTEXT_PAIRS = 3
+_CONTEXT_TOKENS = 600
+
+
+def _turn_index(payload: Any) -> int | None:
+    pair = payload.get("turn_pair") if isinstance(payload, Mapping) else None
+    user = pair.get("user") if isinstance(pair, Mapping) else None
+    value = user.get("turn_idx") if isinstance(user, Mapping) else None
+    return value if isinstance(value, int) else None
+
+
+def _preceding_turns(
+    control_plane: Any,
+    event: Mapping[str, Any],
+    event_id: str,
+    tenant_id: str,
+) -> str | None:
+    """The pairs said just before this one in its session, for resolving "she" or "it".
+
+    The chat route sends this context itself; plain /ingest clients usually do
+    not, so it is rebuilt from the event ledger. Turn order comes from the
+    clients' turn_idx when both pairs have one, else from arrival order.
+    """
+    session_id = event.get("session_id")
+    lister = getattr(control_plane, "list_session_events", None)
+    if not session_id or not callable(lister):
+        return None
+    own_index = _turn_index(event.get("payload"))
+    own_at = event.get("created_at")
+    earlier = []
+    for other in lister(session_id, tenant_id=tenant_id):
+        if other.get("event_id") == event_id:
+            continue
+        index = _turn_index(other.get("payload"))
+        if own_index is not None and index is not None:
+            before = index < own_index
+        else:
+            other_at = other.get("created_at")
+            before = own_at is not None and other_at is not None and other_at < own_at
+        if before:
+            earlier.append((-1 if index is None else index, other))
+    if own_index is not None:
+        earlier.sort(key=lambda item: item[0])
+    lines: list[str] = []
+    for _index, other in earlier[-_CONTEXT_PAIRS:]:
+        pair = _turn_pair(dict(other.get("payload") or {}))
+        lines += [f"{role.upper()}: {text}" for role, text in pair.items() if text]
+    if not lines:
+        return None
+    return tok_mod.truncate_to_tokens("\n".join(lines), _CONTEXT_TOKENS, from_end=True)
 
 
 def _restore_profile_entry_term(value: Any) -> Any:
@@ -1027,6 +1078,9 @@ def canonical_extract_activity(event_id: str, tenant_id: str | None = None) -> s
         model_context = SimpleNamespace(cfg=state.cfg, core=state.core)
         extraction = existing_extraction
         if extraction is None:
+            session_context = payload.get("session_context") or _preceding_turns(
+                state.control_plane, event, event_id, tenant_id
+            )
             turn_pair = _turn_pair(dict(payload))
             combined_text = "\n".join(turn_pair.values())
             profile_recovery_applicable = bool(_PROFILE_ENTRY_TERM.search(combined_text))
@@ -1057,7 +1111,7 @@ def canonical_extract_activity(event_id: str, tenant_id: str | None = None) -> s
                         extraction = _call_extract(
                             cast(Any, model_context),
                             turn_pair,
-                            session_context=payload.get("session_context"),
+                            session_context=session_context,
                             spoken_on=_spoken_on(dict(payload)),
                         )
                 except CoreModelError as err:
@@ -1076,7 +1130,8 @@ def canonical_extract_activity(event_id: str, tenant_id: str | None = None) -> s
                 non_retryable=True,
             )
         # v3: the extractor sees the day the turn was said and resolves relative times.
-        extractor_version = str(extraction.get("extractor_version") or "extract-v3")
+        # v4: it also sees the turns said just before, to resolve "she" or "that trip".
+        extractor_version = str(extraction.get("extractor_version") or "extract-v4")
         if existing_extraction is None:
             _store_canonical_artifact(
                 repository,

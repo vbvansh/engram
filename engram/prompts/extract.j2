@@ -97,7 +97,9 @@ Produce three outputs:
    describe the surface task ("User asked for a contract summary.").
    Use the resolved dates here too, never a bare "yesterday" or "last week".
 
-Preceding session context:
+Preceding session context (earlier turns of this conversation). Use it only to
+resolve references in the turn pair, such as "she", "it" or "that trip"; extract
+only what the turn pair itself says:
 {{ session_context or "(none)" }}
 
 Turn pair (said on {{ spoken_on or "an unknown date" }}):

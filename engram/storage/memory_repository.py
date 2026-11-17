@@ -115,6 +115,15 @@ class InvalidClaimError(MemoryRepositoryError, ValueError):
     """Raised when a typed claim violates the canonical object contract."""
 
 
+try:
+    from psycopg import IntegrityError as _IntegrityError
+except ImportError:  # pragma: no cover - psycopg is a hard dependency in production
+    _IntegrityError = MemoryRepositoryError
+
+# Errors that concern one extracted fact; the message's other facts are kept.
+_SKIPPABLE_FACT_ERRORS: tuple[type[Exception], ...] = (MemoryRepositoryError, _IntegrityError)
+
+
 class RepositoryStore(Protocol):
     """Minimal interface implemented by :class:`PostgresStore`."""
 
@@ -651,6 +660,20 @@ def _datetime(value: Any, *, default: datetime | None = None) -> datetime | None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed
+
+
+def _supports_savepoint(conn: Any) -> bool:
+    return callable(getattr(getattr(conn, "raw", None), "transaction", None))
+
+
+@contextmanager
+def _savepoint(conn: Any) -> Iterator[None]:
+    """Nest a SAVEPOINT on a psycopg connection; a no-op on other stores."""
+    if not _supports_savepoint(conn):
+        yield
+        return
+    with conn.raw.transaction():
+        yield
 
 
 def _turn_said_at(*turns: Any) -> datetime | None:
@@ -1716,7 +1739,12 @@ class MemoryRepository:
             affected_nodes: dict[uuid.UUID, MemoryNode] = {episode.id: episode}
             claims: list[MemoryClaim] = []
             entity_ids: set[uuid.UUID] = set()
-            for index, triplet in enumerate(triplets):
+
+            def commit_triplet(
+                index: int, triplet: dict[str, Any]
+            ) -> tuple[MemoryClaim, dict[uuid.UUID, MemoryNode]]:
+                """Write one fact; return its claim and the entities it touched."""
+                touched: dict[uuid.UUID, MemoryNode] = {}
                 raw_predicate = mapping_value(
                     triplet, "raw_predicate", "predicate", "relation", "property"
                 )
@@ -1731,8 +1759,7 @@ class MemoryRepository:
                     explicit_id=subject_ref,
                     role=f"triplet {index} subject",
                 )
-                entity_ids.add(subject.id)
-                affected_nodes[subject.id] = subject
+                touched[subject.id] = subject
 
                 object_value = mapping_value(
                     triplet,
@@ -1785,8 +1812,7 @@ class MemoryRepository:
                         explicit_id=object_ref,
                         role=f"triplet {index} object",
                     )
-                    entity_ids.add(object_entity.id)
-                    affected_nodes[object_entity.id] = object_entity
+                    touched[object_entity.id] = object_entity
                     normalized_object_value = None
                 else:
                     normalized_object_value = object_for_policy if is_pretyped else normalized.value
@@ -1861,7 +1887,6 @@ class MemoryRepository:
                     if conflict_row is not None:
                         claim = _claim_from_row(conflict_row)
                         bound._bump_node_revision(conn, tenant, subject.id)
-                claims.append(claim)
                 bound.record_evidence(
                     memory_id=subject.id,
                     claim_id=claim.id,
@@ -1879,6 +1904,25 @@ class MemoryRepository:
                     idempotency_key=f"{event_key}:claim:{index}",
                     tenant_id=tenant,
                 )
+                return claim, touched
+
+            # One fact that cannot be written (an ambiguous name, a duplicate
+            # closing interval) is skipped inside its own savepoint, so the
+            # other facts of the message are still kept.
+            skipped_triplets: list[JsonValue] = []
+            protected = _supports_savepoint(conn)
+            for index, triplet in enumerate(triplets):
+                try:
+                    with _savepoint(conn):
+                        claim, touched = commit_triplet(index, triplet)
+                except _SKIPPABLE_FACT_ERRORS as err:
+                    if not protected:
+                        raise
+                    skipped_triplets.append({"triplet_index": index, "error": str(err)[:300]})
+                    continue
+                claims.append(claim)
+                entity_ids.update(touched)
+                affected_nodes.update(touched)
 
             # Keep a durable, idempotent version/evidence trail for every
             # entity touched by this conversation as well as for the episode.
@@ -2008,6 +2052,7 @@ class MemoryRepository:
                 "claim_ids": [str(item.id) for item in claims],
                 "hierarchy_ids": hierarchy_ids,
                 "dispatch_ids": dispatch_ids,
+                "skipped_triplets": skipped_triplets,
                 "replayed": False,
             }
             self._complete_mutation_in_tx(
@@ -2016,10 +2061,16 @@ class MemoryRepository:
                 result_memory_id=episode.id,
                 result=commit_result,
             )
+            # A complete event keeps a note of any fact it had to skip.
+            skipped_note = (
+                f"skipped {len(skipped_triplets)} fact(s): {json.dumps(skipped_triplets)}"[:1000]
+                if skipped_triplets
+                else None
+            )
             conn.execute(
-                "UPDATE events SET status = 'COMPLETE', error_message = NULL, "
+                "UPDATE events SET status = 'COMPLETE', error_message = ?, "
                 "processed_at = CURRENT_TIMESTAMP WHERE tenant_id = ? AND event_id = ?",
-                (tenant, event_key),
+                (skipped_note, tenant, event_key),
             )
             complete_ingest_dispatch(conn)
             commit_result["mutation_id"] = str(mutation.id)
