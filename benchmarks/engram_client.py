@@ -436,12 +436,20 @@ class EngramClient:
             body["max_depth"] = max_depth
         if session_context is not None:
             body["session_context"] = session_context
-        # A transport error (incl. timeout) is wrapped as EngramError so callers
-        # catch it uniformly and one slow query cannot abort a whole run.
-        try:
-            resp = self._http.post("/api/v1/query", json=body, timeout=self.query_timeout_s)
-        except httpx.HTTPError as err:
-            raise EngramError(f"query request failed: {err}") from err
+        # A dropped connection or a timeout is retried twice: a question only
+        # reads memory, so asking it again is safe (85 of 1,986 answers were
+        # once lost this way). The last failure is wrapped as EngramError so
+        # callers catch it uniformly and one bad query cannot abort a run.
+        for attempt in range(3):
+            try:
+                resp = self._http.post("/api/v1/query", json=body, timeout=self.query_timeout_s)
+                break
+            except httpx.TransportError as err:
+                if attempt == 2:
+                    raise EngramError(f"query request failed: {err}") from err
+                time.sleep(5 * (attempt + 1))
+            except httpx.HTTPError as err:
+                raise EngramError(f"query request failed: {err}") from err
         if resp.status_code != 200:
             raise EngramError(f"query failed: {resp.status_code} {resp.text}")
         return resp.json()
