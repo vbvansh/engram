@@ -284,11 +284,18 @@ def _temporal_match(candidate: RetrievalCandidate, plan: RetrievalPlan) -> bool:
         if since is None and scope.days is not None:
             now = datetime.now(timezone.utc)
             since = now - timedelta(days=scope.days)
-        if valid_from is None and valid_until is None:
-            return asserted is None or since is None or asserted >= since
-        return not (
-            (since is not None and valid_until is not None and valid_until <= since)
-            or (until is not None and valid_from is not None and valid_from >= until)
+        # Recent means it happened, was said or ended inside the window; a fact
+        # that started earlier and is still open is old news, not recent.
+        if until is not None and valid_from is not None and valid_from >= until:
+            return False
+        if since is None or (valid_from is None and asserted is None and valid_until is None):
+            return True
+        if any(moment >= since for moment in (valid_from, asserted) if moment is not None):
+            return True
+        return (
+            valid_until is not None
+            and since <= valid_until
+            and (until is None or valid_until <= until)
         )
     return True
 

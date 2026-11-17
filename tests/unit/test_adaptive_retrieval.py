@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
@@ -414,6 +414,47 @@ def test_recent_query_reads_postgres_episodes_without_semantic_search() -> None:
     assert result.retrieval_metadata.routes_attempted == ["L1"]
     assert result.retrieval_metadata.candidates_discovered == 1
     assert "recent verified episode" in frontier.calls[0].lower()
+
+
+def _recent_plan(now: datetime) -> RetrievalPlan:
+    return RetrievalPlan(
+        query="What did Melanie paint recently?",
+        intent="recent_context",
+        primary_route="L1",
+        routes=["L1", "L2"],
+        temporal_scope=TemporalScope(
+            kind=TemporalKind.RECENT, since=now - timedelta(days=10), until=now, days=10
+        ),
+    )
+
+
+def _is_recent(plan: RetrievalPlan, **dates: Any) -> bool:
+    candidate = RetrievalCandidate.from_row(_canonical_claim(**dates), canonical=True)
+    return bool(CanonicalVerifier().verify([candidate], plan=plan, tenant_id="_default"))
+
+
+def test_an_old_dated_event_is_not_recent() -> None:
+    now = datetime.now(timezone.utc)
+    plan = _recent_plan(now)
+
+    # "Completed a painting on 17 July 2023" has no end date, but it happened
+    # long before the recent window, so it must not answer "recently".
+    assert not _is_recent(
+        plan,
+        valid_from=datetime(2023, 7, 17, tzinfo=timezone.utc),
+        asserted_at=datetime(2023, 7, 17, 13, 0, tzinfo=timezone.utc),
+    )
+
+
+def test_recent_means_it_happened_was_said_or_ended_inside_the_window() -> None:
+    now = datetime.now(timezone.utc)
+    plan = _recent_plan(now)
+    old = datetime(2023, 1, 1, tzinfo=timezone.utc)
+
+    assert _is_recent(plan, valid_from=now - timedelta(days=2))
+    assert _is_recent(plan, valid_from=None, asserted_at=now - timedelta(days=1))
+    assert _is_recent(plan, valid_from=old, valid_until=now - timedelta(days=3))
+    assert not _is_recent(plan, valid_from=None, asserted_at=old)
 
 
 def test_ambiguous_alias_requires_disambiguation_instead_of_arbitrary_entity() -> None:
