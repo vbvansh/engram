@@ -28,6 +28,11 @@ questions only afterwards, so each one is measured against the same index:
     # 3) merge chunked question runs, if any
     python benchmarks/merge_results.py benchmarks/results/locomo-<run1> ...
 
+A store that stops on a stuck stack (or loses messages to a provider outage)
+resumes from the conversation it stopped at, retrying the failed messages:
+
+    python benchmarks/run_locomo.py --ingest-only --tenant-run base1 --start-conv 2 --retry-failed
+
 Env (loaded from .env.local when run from the repo root):
     ENGRAM_BASE_URL       default http://127.0.0.1:8001
     ENGRAM_ADMIN_KEY      required (creates per-conversation tenants)
@@ -51,6 +56,7 @@ from importlib import metadata
 from pathlib import Path
 
 import httpx
+import psycopg
 
 # Allow running as `python benchmarks/run_locomo.py` from the repo root.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -319,6 +325,13 @@ def run(args: argparse.Namespace) -> int:
                         continue
                     print(f"  sent {n_pairs} pairs in {time.monotonic() - t0:.1f}s; "
                           f"waiting for write + Neo4j copy...")
+                    if args.retry_failed:
+                        # Pairs stored earlier are not processed again by a
+                        # re-send; failed ones need Engram's retry endpoint.
+                        try:
+                            print(f"  retried {client.retry_failed_events()} failed message(s)")
+                        except (EngramError, httpx.HTTPError, psycopg.Error) as err:
+                            print(f"  ! retrying failed messages did not work: {err}")
 
                 def _progress(elapsed: float, events: dict, projections: dict) -> None:
                     done = sum(events.get(s, 0) for s in ("COMPLETE", "GATED_SKIP", "FAILED"))
@@ -337,6 +350,14 @@ def run(args: argparse.Namespace) -> int:
                     ingests[conv.sample_id] = {**drain.to_dict(), "pairs_sent": n_pairs}
                 except DrainTimeout as err:
                     print(f"  ! DRAIN FAILED: {err}")
+                    if not args.reuse_tenant:
+                        # Sending the next conversation into a stuck stack only
+                        # piles up work that then fails together. Stop here.
+                        print(f"  ! stopping the run: fix the stack, then resume with "
+                              f"--start-conv {cidx} --retry-failed (same --tenant-run)")
+                        skipped.append({"conv_idx": cidx, "sample_id": conv.sample_id,
+                                        "reason": f"drain failed: {err}"})
+                        break
 
                 # Scoring a conversation whose ingest did not finish produces a
                 # real-looking accuracy against a memory that was never built.
@@ -525,6 +546,9 @@ def main() -> int:
     p.add_argument("--ingest-only", action="store_true",
                    help="store and wait, but ask no questions; ask them later with "
                         "--reuse-tenant once every conversation is stored")
+    p.add_argument("--retry-failed", action="store_true",
+                   help="after sending a conversation, send its FAILED messages back "
+                        "through Engram's retry API (resume a store hit by an outage)")
     p.add_argument("--tenant-run", default=None, metavar="NAME",
                    help="fixed middle part of tenant ids (locomo-NAME-c0...) so chunked "
                         "ingest runs share one naming scheme; default: this run's id")

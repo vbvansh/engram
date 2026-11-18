@@ -66,7 +66,10 @@ class DrainConfig:
     # legitimately takes well over an hour.
     max_wait_s: float = 10800.0  # hard ceiling for one conversation's ingest
     poll_interval_s: float = 5.0  # how often to poll
-    stall_timeout_s: float = 600.0  # abort only if nothing moves for this long
+    # Abort only if nothing moves for this long. A finished gate or extraction
+    # step counts as movement, so a large conversation whose messages all wait
+    # in the queue behind each other's first step is not mistaken for a stall.
+    stall_timeout_s: float = 1800.0
     # Tolerate a few permanently-wedged messages once this share is finished.
     straggler_ok_ratio: float = 0.97
     straggler_grace_s: float = 180.0
@@ -284,6 +287,24 @@ class EngramClient:
             raise EngramError(f"event status failed: {resp.status_code} {resp.text}")
         return resp.json()
 
+    def retry_failed_events(self) -> int:
+        """Send every FAILED event of this tenant back through Engram's retry API.
+
+        Re-sending a pair is a no-op for an event that already exists, so a
+        message that failed (e.g. during a provider outage) is only processed
+        again through POST /api/v1/events/{id}/retry. Returns the count retried.
+        """
+        with psycopg.connect(self._dsn(), connect_timeout=10) as conn:
+            event_ids = [row[0] for row in conn.execute(
+                "SELECT event_id FROM events WHERE tenant_id = %s AND status = 'FAILED'",
+                (self.tenant_id,),
+            ).fetchall()]
+        for event_id in event_ids:
+            resp = self._http.post(f"/api/v1/events/{event_id}/retry")
+            if resp.status_code != 200:
+                raise EngramError(f"retry {event_id} failed: {resp.status_code} {resp.text}")
+        return len(event_ids)
+
     # -- drain (Issue A) ---------------------------------------------------
 
     def _dsn(self) -> str:
@@ -329,6 +350,18 @@ class EngramClient:
         except psycopg.Error:
             return {}
         return {str(reason): int(n) for reason, n in rows}
+
+    def step_count(self) -> int | None:
+        """Finished gate/extraction steps of this tenant (progress before a message is done)."""
+        try:
+            with psycopg.connect(self._dsn(), connect_timeout=10) as conn:
+                row = conn.execute(
+                    "SELECT count(*) FROM ingest_artifacts WHERE tenant_id = %s",
+                    (self.tenant_id,),
+                ).fetchone()
+        except psycopg.Error:
+            return None
+        return int(row[0]) if row else 0
 
     def wait_for_drain(
         self,
@@ -378,8 +411,13 @@ class EngramClient:
 
             # Progress = ANY movement in either breakdown, not just a drop in the
             # pending total: RECEIVED -> COMPLETE also creates new copy jobs, so
-            # the total alone can stand still while real work is happening.
-            snapshot = (tuple(sorted(events.items())), tuple(sorted(projections.items())))
+            # the total alone can stand still while real work is happening. A
+            # finished gate or extraction step counts too.
+            snapshot = (
+                tuple(sorted(events.items())),
+                tuple(sorted(projections.items())),
+                self.step_count(),
+            )
             if snapshot != last_snapshot:
                 last_snapshot = snapshot
                 last_change = now
