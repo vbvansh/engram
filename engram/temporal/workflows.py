@@ -19,6 +19,18 @@ _RETRY = RetryPolicy(
     maximum_attempts=8,
 )
 
+# Gate and extraction call the model provider. A network or provider outage
+# (connection errors, then an open circuit breaker) is waited out for about two
+# hours instead of the ~5 minutes of _RETRY, so a queue of messages is not
+# failed in bulk by a short outage. Invalid input still fails at once
+# (non-retryable ApplicationError).
+_MODEL_CALL_RETRY = RetryPolicy(
+    initial_interval=timedelta(seconds=2),
+    backoff_coefficient=2.0,
+    maximum_interval=timedelta(minutes=10),
+    maximum_attempts=20,
+)
+
 _MAINTENANCE_RETRY = RetryPolicy(
     initial_interval=timedelta(seconds=5),
     backoff_coefficient=2.0,
@@ -86,14 +98,14 @@ class CanonicalIngestWorkflow:
                 "engram.canonical_gate",
                 args=[event_id, tenant_id],
                 start_to_close_timeout=timedelta(minutes=10),
-                retry_policy=_RETRY,
+                retry_policy=_MODEL_CALL_RETRY,
             )
             if isinstance(gate, dict) and bool(gate.get("store")):
                 await workflow.execute_activity(
                     "engram.canonical_extract",
                     args=[event_id, tenant_id],
                     start_to_close_timeout=timedelta(minutes=10),
-                    retry_policy=_RETRY,
+                    retry_policy=_MODEL_CALL_RETRY,
                 )
             return await workflow.execute_activity(
                 "engram.commit_canonical",
