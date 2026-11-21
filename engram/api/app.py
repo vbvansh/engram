@@ -448,6 +448,8 @@ def query(req: schemas.QueryRequest):
             session_context=req.session_context,
             max_depth=req.max_depth,
             max_reentries=req.max_reentries,
+            answer_style=req.answer_style,
+            answer_instructions=req.answer_instructions,
         )
     except Exception as err:
         log.exception("query failed")

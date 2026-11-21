@@ -487,6 +487,57 @@ def test_uri_only_discovery_is_insufficient_and_frontier_is_not_called() -> None
     assert frontier.calls == []
 
 
+class PromptFrontier(RecordingFrontier):
+    def __init__(self) -> None:
+        super().__init__()
+        self.prompts: list[tuple[str, str]] = []
+
+    def answer(
+        self, *, system_prompt: str, msc: str, user_query: str, allow_need_more: bool = True
+    ) -> FrontierVerdict:
+        self.prompts.append((system_prompt, user_query))
+        return super().answer(
+            system_prompt=system_prompt, msc=msc, user_query=user_query,
+            allow_need_more=allow_need_more,
+        )
+
+
+def test_short_answer_style_changes_only_the_answer_step() -> None:
+    plain, short = PromptFrontier(), PromptFrontier()
+    asked = run_query(_context(RecentRepository(), plain, neo=NeoDiscovery()),
+                      session_id=None, query="What happened recently?")
+    shaped = run_query(
+        _context(RecentRepository(), short, neo=NeoDiscovery()),
+        session_id=None,
+        query="What happened recently?",
+        answer_style="short",
+        answer_instructions="Select the correct answer: (a) a party (b) a trip.",
+    )
+
+    system, user_query = short.prompts[0]
+    assert "short phrase" in system and "short phrase" not in plain.prompts[0][0]
+    assert user_query == (
+        "What happened recently? Select the correct answer: (a) a party (b) a trip."
+    )
+    # Memory search is the same: planning and routes ignore the answer wording.
+    assert shaped.retrieval_metadata.routes_attempted == asked.retrieval_metadata.routes_attempted
+    assert shaped.retrieval_metadata.l0_reason == asked.retrieval_metadata.l0_reason
+
+
+def test_short_answer_style_says_no_information_available_without_evidence() -> None:
+    frontier = RecordingFrontier()
+    result = run_query(
+        _context(DiscoveryRepository(), frontier, neo=UriOnlyNeo()),
+        session_id=None,
+        query="Who is connected to Angie?",
+        answer_style="short",
+    )
+
+    assert result.answerability_state == AnswerabilityState.INSUFFICIENT_EVIDENCE.value
+    assert result.answer == "No information available."
+    assert frontier.calls == []
+
+
 def test_temporal_verifier_rejects_claim_outside_as_of_point() -> None:
     plan = RetrievalPlan(
         query="role as of 2024-01-01",

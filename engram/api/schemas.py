@@ -91,6 +91,12 @@ class QueryRequest(BaseModel):
     max_depth: str | None = Field(default=None, pattern=r"^L[0-4]$|^SESSION$")
     max_reentries: int | None = Field(default=None, ge=0, le=5)
     stream: bool = False
+    # "short" answers with a short phrase instead of sentences (benchmark QA
+    # formats such as LoCoMo's). Memory search is the same for both styles.
+    answer_style: Literal["default", "short"] = "default"
+    # Extra wording shown only to the answer step, never to memory search,
+    # e.g. a benchmark's answer options or "answer with an approximate date".
+    answer_instructions: str | None = Field(default=None, max_length=MAX_QUERY_LENGTH)
 
 
 class QueryResponse(BaseModel):

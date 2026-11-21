@@ -178,8 +178,14 @@ def run_query(
     max_depth: str | None = None,
     max_reentries: int | None = None,
     on_step: Callable[[dict[str, Any]], None] | None = None,
+    answer_style: str = "default",
+    answer_instructions: str | None = None,
 ) -> QueryResult:
-    """Plan, retrieve, verify, and answer one query."""
+    """Plan, retrieve, verify, and answer one query.
+
+    ``answer_style`` and ``answer_instructions`` shape only the final answer;
+    planning and memory search always use ``query`` alone.
+    """
 
     del max_reentries  # Adaptive evidence routing owns escalation and stopping.
     scoped_session_id = session_id or f"query-{uuid.uuid4().hex}"
@@ -191,7 +197,16 @@ def run_query(
             session_context=session_context,
             max_depth=max_depth,
             on_step=on_step,
+            answer_format=AnswerFormat(answer_style, answer_instructions),
         )
+
+
+@dataclass(frozen=True)
+class AnswerFormat:
+    """How the final answer is worded; never used for planning or search."""
+
+    style: str = "default"
+    instructions: str | None = None
 
 
 def _run_query(
@@ -202,6 +217,7 @@ def _run_query(
     session_context: str | None,
     max_depth: str | None,
     on_step: Callable[[dict[str, Any]], None] | None,
+    answer_format: AnswerFormat = AnswerFormat(),
 ) -> QueryResult:
     del session_id
     md = RetrievalMetadata()
@@ -248,6 +264,7 @@ def _run_query(
             session_context=session_context,
             query=query,
             on_step=on_step,
+            answer_format=answer_format,
         )
 
     allowed_cap = _depth_rank(max_depth)
@@ -290,6 +307,7 @@ def _run_query(
                     session_context=session_context,
                     query=query,
                     on_step=on_step,
+                    answer_format=answer_format,
                 )
             except CanonicalRepositoryUnavailableError as err:
                 log.error("canonical memory retrieval unavailable: %s", err)
@@ -306,6 +324,7 @@ def _run_query(
                     session_context=session_context,
                     query=query,
                     on_step=on_step,
+                    answer_format=answer_format,
                 )
         md.latency_ms[f"{route.value.lower()}_retrieve"] = (time.perf_counter() - started) * 1000
         md.candidates_discovered += discovered
@@ -338,6 +357,7 @@ def _run_query(
         session_context=session_context,
         query=query,
         on_step=on_step,
+        answer_format=answer_format,
     )
 
 
@@ -1449,8 +1469,13 @@ def _finish_query(
     session_context: str | None,
     query: str,
     on_step: Callable[[dict[str, Any]], None] | None,
+    answer_format: AnswerFormat = AnswerFormat(),
 ) -> QueryResult:
     _record_assessment(md, assessment)
+    short = answer_format.style == "short"
+    answer_query = (
+        f"{query} {answer_format.instructions}" if answer_format.instructions else query
+    )
 
     # Exact current facts do not need a generative answer when PostgreSQL has
     # already supplied one unambiguous, evidence-backed claim.  Rendering the
@@ -1483,6 +1508,8 @@ def _finish_query(
                 "I found multiple canonical entities matching that name; "
                 "please provide more identifying context."
             )
+        elif short:
+            answer = _SHORT_NO_ANSWER
         else:
             answer = "I don't have enough verified memory evidence to answer that."
         md.total_context_tokens = 0
@@ -1515,7 +1542,7 @@ def _finish_query(
         plan,
         assessment,
         session_context=session_context,
-        user_query=query,
+        user_query=answer_query,
         context_window=context_budget,
     )
     md.total_context_tokens = tok_mod.count_tokens(msc)
@@ -1535,7 +1562,7 @@ def _finish_query(
     started = time.perf_counter()
     try:
         verdict: FrontierVerdict = frontier.answer(
-            system_prompt=(
+            system_prompt=_SHORT_ANSWER_SYSTEM if short else (
                 "You are Engram's final answer generator. Use only the verified "
                 "canonical evidence in the context. Preserve the stated "
                 "answerability state, temporal scope, and uncertainty. "
@@ -1553,7 +1580,7 @@ def _finish_query(
                 "such as fictional only once. Prefer two to four concise sentences."
             ),
             msc=msc,
-            user_query=query,
+            user_query=answer_query,
             allow_need_more=False,
         )
         answer = verdict.answer or _fallback_answer(assessment)
@@ -1568,6 +1595,19 @@ def _finish_query(
     _notify_step(on_step, md, "frontier_answer")
     return QueryResult(answer, md, assessment.state.value, assessment.verified_evidence)
 
+
+# answer_style="short": the wording of LoCoMo's official QA prompt ("write an
+# answer in the form of a short phrase ... exact words from the context").
+_SHORT_NO_ANSWER = "No information available."
+_SHORT_ANSWER_SYSTEM = (
+    "You are Engram's final answer generator. Use only the verified canonical "
+    "evidence in the context, and respect its temporal scope. Do not infer "
+    "missing facts from similarity scores. Write the answer in the form of a "
+    "short phrase, using exact words from the evidence whenever possible: no "
+    "full sentence and no explanation. When the question offers answer options, "
+    "reply with the text of the option you choose. If the evidence does not "
+    f"answer the question, reply exactly: {_SHORT_NO_ANSWER}"
+)
 
 _EXACT_PREDICATE_TEMPLATES: dict[str, str] = {
     "WORKS_AT": "{subject} works at {objects}.",
