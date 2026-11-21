@@ -13,7 +13,7 @@ and how to fix each one. The numbers come from that test.
 | 3 | Dates stay as "last week" | Date questions: only 24% correct | Turn relative times into real dates when storing — **fixed** (see result below) |
 | 4 | Facts get wrong or vague labels | Feeds problem 1; template answers only 10% correct | Keep searching after a guessed label — **template answers fixed** (see result below); a label list for everyday life, fixed synonyms |
 | 5 | Other users' memories crowd out search results | Search missed 8.5% of the right memories; no score change | Filter by user inside the search, not after it — **fixed** (see result below) |
-| 6 | Messages are stored without their context | Not yet measured | Send earlier turns; don't drop a whole message |
+| 6 | Messages are stored without their context | "Does not specify" answers; single-hop 56% correct | Send earlier turns; don't drop a whole message — **fixed** (see result below) |
 
 ---
 
@@ -150,14 +150,16 @@ fix 4 (same judge); 85 answers lost to dropped connections were asked again.
 the 45 normal ones went from 31 to 6 correct. Engram measures "recently" from
 today's real date, and a fact with an event date but no end date counts as
 still true, so an event from 2023 now passes the "recent" filter. Engram then
-stops searching early and answers from the wrong facts. Next fix: a fact
+stops searching early and answers from the wrong facts. **Fixed:** a fact now
 counts as recent only if it happened, was said or ended within the recent
-period.
+period. The 45 normal "recently" questions went from 6 to 35 correct
+(measured together with problem 6, see its result).
 
 Storing also failed for 1 message of about 2,900: all messages in a session
 now share the session's date, so when a one-value fact changes back and forth
 within one session, two records get the same dates and the database refuses
-the second. To be fixed before the next time conversations are stored again.
+the second. **Fixed** together with problem 6: that one fact is skipped and
+the rest of the message is kept.
 
 ## 4. Facts get wrong or vague labels
 
@@ -268,6 +270,33 @@ know".
 - Send the previous few turns along with each message (the system already
   accepts this).
 - When a name is unclear, skip or flag only that one fact and store the rest.
+
+**Result — fixed.** When a message is stored, Engram now looks up the three
+message pairs said just before it in the same session and gives them to the
+fact-extraction step, which uses them only to work out "she", "it" or "that
+trip". For example, "I felt super powerful giving my talk" used to be stored
+as "Caroline gave a talk"; now it becomes "Caroline gave a talk at her school
+event last week (the week before 9 June 2023)". One fact that cannot be
+stored (an unclear name, or two records with the same dates) is now skipped
+on its own and the rest of the message is kept. All conversations were stored
+again. Measured together with the "recently" fix from problem 3, compared one
+by one with the run after fix 5 (same judge):
+
+| | Before | After |
+|---|---|---|
+| Strict score (1,540 questions) | 52.8% | 59.2% (+6.4, not luck) |
+| J score (1,540 questions) | 62.1% | 67.7% (+5.6, not luck) |
+| Single-hop questions | 56.4% | 66.0% (+9.6, not luck) |
+| "Recently" questions answered correctly (45 normal ones) | 6 | 35 |
+| Answers saying the memory "does not specify" | 181 | 132 |
+| Trick (adversarial) questions handled correctly | 57.8% | 59.4% (no change) |
+| Messages that failed to store | 1 | 0 |
+| Correct answers over all 1,986 questions | 1,071 | 1,177 (+106) |
+
+The "recently" fix only changes those 68 questions. On all the others the
+normal questions gained 70 (mostly single-hop), which comes from the earlier
+turns; storing everything again also adds some randomness. Questions also got
+faster (median 22 → 16 seconds).
 
 ---
 
