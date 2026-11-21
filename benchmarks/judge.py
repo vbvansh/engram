@@ -34,6 +34,11 @@ import httpx
 
 DEFAULT_BASE = "https://opencode.ai/zen/go/v1"
 DEFAULT_MODEL = "mimo-v2.6-flash"
+# The judges the benchmarks' own papers used (official numbers). OpenAI
+# deprecated both on 2026-10-14; they stop answering on 2027-01-14.
+OPENAI_BASE = "https://api.openai.com/v1"
+MEM0_OFFICIAL_JUDGE = "gpt-4o-mini-2024-07-18"  # Mem0 paper's J score
+LONGMEMEVAL_OFFICIAL_JUDGE = "gpt-4o-2024-08-06"  # LongMemEval evaluate_qa.py
 # The new stack names the OpenCode key OPENCODE_GO_API_KEY; the old one used
 # OPENCODE_API_KEY. Either works — it is the same OpenCode Zen Go key.
 API_KEY_ENVS = ("OPENCODE_GO_API_KEY", "OPENCODE_API_KEY")
@@ -130,12 +135,16 @@ class OpenCodeJudge:
         model: str = DEFAULT_MODEL,
         timeout_s: float = 60.0,
         max_retries: int = 3,
+        mem0_system_prompt: bool = True,
     ) -> None:
         api_key = api_key or judge_api_key()
         if not api_key:
             raise RuntimeError(f"one of {', '.join(API_KEY_ENVS)} is required for the judge")
         self.model = model
         self.max_retries = max_retries
+        # Our J runs add a short system line; the Mem0 paper's own judge call
+        # sends the prompt alone, which official_judge() reproduces.
+        self.mem0_system_prompt = mem0_system_prompt
         # Providers vary in whether they accept response_format=json_object.
         # Start with it on; _chat drops it permanently after a 4xx rejection.
         self._use_json_mode = True
@@ -162,25 +171,27 @@ class OpenCodeJudge:
     def __exit__(self, *exc: object) -> None:
         self.close()
 
-    def _chat(self, system: str, user: str) -> str:
-        """One deterministic JSON chat call, with a small retry on transport."""
+    def _chat(
+        self, system: str | None, user: str, *, json_mode: bool = True, max_tokens: int = 256
+    ) -> str:
+        """One deterministic chat call (JSON by default), with a small retry on transport."""
         last_err: Exception | None = None
+        messages = [{"role": "user", "content": user}]
+        if system:
+            messages.insert(0, {"role": "system", "content": system})
         for attempt in range(self.max_retries + 1):
             payload: dict[str, object] = {
                 "model": self.model,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
+                "messages": messages,
                 "temperature": 0.0,
-                "max_tokens": 256,
+                "max_tokens": max_tokens,
             }
-            if self._use_json_mode:
+            if json_mode and self._use_json_mode:
                 payload["response_format"] = {"type": "json_object"}
             try:
                 resp = self._http.post("/chat/completions", json=payload)
                 # Some providers reject response_format; drop it and retry once.
-                if resp.status_code in (400, 422) and self._use_json_mode:
+                if resp.status_code in (400, 422) and "response_format" in payload:
                     self._use_json_mode = False
                     continue
                 resp.raise_for_status()
@@ -272,8 +283,9 @@ class OpenCodeJudge:
             gold_answer=gold_answer or "(none)",
             generated_answer=predicted_answer or "(empty)",
         )
+        system = "You are a careful grader." if self.mem0_system_prompt else None
         try:
-            raw = self._chat("You are a careful grader.", prompt)
+            raw = self._chat(system, prompt)
         except RuntimeError as err:
             return JudgeResult(correct=False, reason=f"judge-error: {err}", judged=False)
         label = None
@@ -290,6 +302,89 @@ class OpenCodeJudge:
             return JudgeResult(correct=False, reason="judge-unparseable", raw=raw, judged=False)
         reason = raw[:start].strip() if start > 0 else ""
         return JudgeResult(correct=label == "CORRECT", reason=reason[:300], raw=raw)
+
+    def judge_longmemeval(
+        self, *, question_type: str, question: str, answer: str, response: str, abstention: bool
+    ) -> JudgeResult:
+        """Grade like LongMemEval's evaluate_qa.py: its prompt, temperature 0,
+        max_tokens 10, correct iff "yes" appears in the reply. Never raises."""
+        prompt = longmemeval_prompt(question_type, question, answer, response, abstention)
+        try:
+            raw = self._chat(None, prompt, json_mode=False, max_tokens=10)
+        except RuntimeError as err:
+            return JudgeResult(correct=False, reason=f"judge-error: {err}", judged=False)
+        return JudgeResult(correct="yes" in raw.strip().lower(), reason=raw.strip(), raw=raw)
+
+
+def official_judge(model: str) -> OpenCodeJudge:
+    """A judge on OpenAI's API with the benchmark papers' own judge model."""
+    from envfile import find_env_value
+
+    key = find_env_value("OPENAI_API_KEY")
+    if not key:
+        raise RuntimeError("OPENAI_API_KEY is required for the official judge (Code\\.env)")
+    return OpenCodeJudge(api_key=key, base_url=OPENAI_BASE, model=model, mem0_system_prompt=False)
+
+
+def longmemeval_prompt(
+    task: str, question: str, answer: str, response: str, abstention: bool = False
+) -> str:
+    """get_anscheck_prompt() of LongMemEval src/evaluation/evaluate_qa.py, verbatim."""
+    if not abstention:
+        if task in ["single-session-user", "single-session-assistant", "multi-session"]:
+            template = (
+                "I will give you a question, a correct answer, and a response from a model. "
+                "Please answer yes if the response contains the correct answer. Otherwise, "
+                "answer no. If the response is equivalent to the correct answer or contains all "
+                "the intermediate steps to get the correct answer, you should also answer yes. "
+                "If the response only contains a subset of the information required by the "
+                "answer, answer no. \n\nQuestion: {}\n\nCorrect Answer: {}\n\nModel Response: "
+                "{}\n\nIs the model response correct? Answer yes or no only."
+            )
+        elif task == "temporal-reasoning":
+            template = (
+                "I will give you a question, a correct answer, and a response from a model. "
+                "Please answer yes if the response contains the correct answer. Otherwise, "
+                "answer no. If the response is equivalent to the correct answer or contains all "
+                "the intermediate steps to get the correct answer, you should also answer yes. "
+                "If the response only contains a subset of the information required by the "
+                "answer, answer no. In addition, do not penalize off-by-one errors for the "
+                "number of days. If the question asks for the number of days/weeks/months, etc., "
+                "and the model makes off-by-one errors (e.g., predicting 19 days when the answer "
+                "is 18), the model's response is still correct. \n\nQuestion: {}\n\nCorrect "
+                "Answer: {}\n\nModel Response: {}\n\nIs the model response correct? Answer yes "
+                "or no only."
+            )
+        elif task == "knowledge-update":
+            template = (
+                "I will give you a question, a correct answer, and a response from a model. "
+                "Please answer yes if the response contains the correct answer. Otherwise, "
+                "answer no. If the response contains some previous information along with an "
+                "updated answer, the response should be considered as correct as long as the "
+                "updated answer is the required answer.\n\nQuestion: {}\n\nCorrect Answer: "
+                "{}\n\nModel Response: {}\n\nIs the model response correct? Answer yes or no only."
+            )
+        elif task == "single-session-preference":
+            template = (
+                "I will give you a question, a rubric for desired personalized response, and a "
+                "response from a model. Please answer yes if the response satisfies the desired "
+                "response. Otherwise, answer no. The model does not need to reflect all the "
+                "points in the rubric. The response is correct as long as it recalls and "
+                "utilizes the user's personal information correctly.\n\nQuestion: {}\n\nRubric: "
+                "{}\n\nModel Response: {}\n\nIs the model response correct? Answer yes or no only."
+            )
+        else:
+            raise NotImplementedError(task)
+    else:
+        template = (
+            "I will give you an unanswerable question, an explanation, and a response from a "
+            "model. Please answer yes if the model correctly identifies the question as "
+            "unanswerable. The model could say that the information is incomplete, or some other "
+            "information is given but the asked information is not.\n\nQuestion: {}\n\n"
+            "Explanation: {}\n\nModel Response: {}\n\nDoes the model correctly identify the "
+            "question as unanswerable? Answer yes or no only."
+        )
+    return template.format(question, answer, response)
 
 
 if __name__ == "__main__":

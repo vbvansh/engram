@@ -12,7 +12,13 @@ Engram's answers are already in rows.jsonl, so scoring never needs a re-run:
 * J   -- LLM-as-a-Judge with the Mem0 paper's prompt (lenient, binary), on
          categories 1-4 only (1,540 questions), as in the Mem0 paper. Needs
          --judge (one model call per question); results are cached in
-         scored.jsonl so an interrupted run resumes.
+         scored.jsonl so an interrupted run resumes. --official-judge grades
+         it again with the Mem0 paper's own judge model on OpenAI.
+
+The official LoCoMo number is F1 over all 1,986 questions, adversarial
+included; it is printed first. It is meaningful for runs asked in LoCoMo's
+own QA format (run_locomo.py --official-format: short answers, the date hint
+and the adversarial answer options).
 
 Our own strict judge (the `correct` field written by run_locomo.py) is kept
 alongside: it stays the internal before/after metric, because the lenient J
@@ -44,7 +50,7 @@ from nltk.translate.bleu_score import SmoothingFunction, sentence_bleu
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from envfile import load_env_file  # noqa: E402
-from judge import DEFAULT_MODEL, OpenCodeJudge  # noqa: E402
+from judge import DEFAULT_MODEL, MEM0_OFFICIAL_JUDGE, OpenCodeJudge, official_judge  # noqa: E402
 from merge_results import load_rows  # noqa: E402
 
 _stemmer = PorterStemmer()
@@ -114,9 +120,13 @@ def summarize(rows: list[dict]) -> dict:
 
     def block(group: list[dict]) -> dict:
         jj = [r for r in group if r.get("j_mem0") is not None]
+        jo = [r for r in group if r.get("j_official") is not None]
         return {
             "n": len(group),
             "J_mem0": round(100 * _mean([float(r["j_mem0"]) for r in jj]), 2) if jj else None,
+            "J_official": (
+                round(100 * _mean([float(r["j_official"]) for r in jo]), 2) if jo else None
+            ),
             "F1": round(100 * _mean([r["f1"] for r in group]), 2),
             "BLEU1": round(100 * _mean([r["bleu1"] for r in group]), 2),
             "strict_judge": round(100 * _mean([float(bool(r["correct"])) for r in group]), 2),
@@ -125,7 +135,19 @@ def summarize(rows: list[dict]) -> dict:
     by_cat = defaultdict(list)
     for r in std:
         by_cat[r["category_name"]].append(r)
+    all_by_cat = defaultdict(list)
+    for r in rows:
+        all_by_cat[r["category_name"]].append(r)
     return {
+        # The LoCoMo paper's own number: F1 over every question, adversarial included.
+        "official_f1": {
+            "overall": round(100 * _mean([r["f1"] for r in rows]), 2),
+            "n": len(rows),
+            "by_category": {
+                k: round(100 * _mean([r["f1"] for r in v]), 2)
+                for k, v in sorted(all_by_cat.items())
+            },
+        },
         "standard_1540": block(std),
         "standard_by_category": {k: block(v) for k, v in sorted(by_cat.items())},
         "adversarial": {
@@ -136,16 +158,26 @@ def summarize(rows: list[dict]) -> dict:
         "all_1986_strict_judge": round(100 * _mean([float(bool(r["correct"])) for r in rows]), 2),
         "j_mem0_judged": len(judged_j),
         "j_mem0_failures": sum(1 for r in std if r.get("j_mem0_failed")),
+        "j_official_failures": sum(1 for r in std if r.get("j_official_failed")),
     }
 
 
 def print_summary(s: dict, judge_model: str | None) -> None:
+    off = s["official_f1"]
+    print("\n" + "=" * 70)
+    print(f"OFFICIAL LoCoMo F1 (Maharana et al. 2024): all 5 categories, n={off['n']}")
+    print("=" * 70)
+    print(f"  overall F1: {off['overall']:.2f}")
+    print("  " + "  ".join(f"{k} {v:.2f}" for k, v in off["by_category"].items()))
     std = s["standard_1540"]
     print("\n" + "=" * 70)
     print(f"STANDARD LoCoMo view: categories 1-4, n={std['n']} (adversarial excluded)")
     print("=" * 70)
     j = "-" if std["J_mem0"] is None else f"{std['J_mem0']:.2f}"
     print(f"  J (Mem0 judge prompt{', ' + judge_model if judge_model else ''}): {j}")
+    if std["J_official"] is not None:
+        print(f"  J (Mem0 judge prompt, official judge {MEM0_OFFICIAL_JUDGE}): "
+              f"{std['J_official']:.2f}")
     print(f"  F1 (LoCoMo official):  {std['F1']:.2f}")
     print(f"  BLEU-1:                {std['BLEU1']:.2f}")
     print(f"  our strict judge:      {std['strict_judge']:.2f}")
@@ -160,6 +192,9 @@ def print_summary(s: dict, judge_model: str | None) -> None:
     print(f"  all 1,986 questions, our strict judge: {s['all_1986_strict_judge']:.2f}")
     if s["j_mem0_failures"]:
         print(f"  ! {s['j_mem0_failures']} J judge failure(s) — re-run with --judge to retry them")
+    if s["j_official_failures"]:
+        print(f"  ! {s['j_official_failures']} official J failure(s) — re-run with "
+              "--official-judge to retry them")
 
 
 def run_judge_models(runs: list[str]) -> set[str]:
@@ -184,6 +219,9 @@ def main() -> int:
     p.add_argument("--rejudge-strict", action="store_true",
                    help="with --judge: re-grade every strict verdict, not only failures "
                         "(needed when the run was graded by another judge model)")
+    p.add_argument("--official-judge", action="store_true",
+                   help=f"also grade J with the Mem0 paper's own judge ({MEM0_OFFICIAL_JUDGE} "
+                        "on OpenAI; needs OPENAI_API_KEY)")
     p.add_argument("--workers", type=int, default=6, help="parallel judge calls")
     p.add_argument("--out", default=None,
                    help="output directory (default: the first run directory)")
@@ -210,22 +248,50 @@ def main() -> int:
     # Reuse earlier verdicts (resume) when the same answer was already judged by
     # the same judge model; verdicts of another judge model are ignored.
     cache: dict[tuple, dict] = {}
+    official_cache: dict[tuple, dict] = {}  # always one model, so any earlier verdict counts
     if scored_path.exists():
         for line in scored_path.read_text(encoding="utf-8").splitlines():
             old = json.loads(line)
+            key = (old["sample_id"], old["q_idx"], old["predicted"])
             if old.get("judge_model") == args.judge_model:
-                cache[(old["sample_id"], old["q_idx"], old["predicted"])] = old
+                cache[key] = old
+            if "j_official" in old:
+                official_cache[key] = old
 
     for r in rows:
         r["f1"] = locomo_f1(r["predicted"], r["gold"], int(r["category"]))
         r["bleu1"] = bleu1(r["predicted"], r["gold"])
-        old = cache.get((r["sample_id"], r["q_idx"], r["predicted"]), {})
-        for key in ("j_mem0", "j_mem0_reason", "j_mem0_failed", "strict_rejudged",
-                    "judge_model"):
-            if key in old:
-                r[key] = old[key]
+        key = (r["sample_id"], r["q_idx"], r["predicted"])
+        old = cache.get(key, {})
+        for name in ("j_mem0", "j_mem0_reason", "j_mem0_failed", "strict_rejudged",
+                     "judge_model"):
+            if name in old:
+                r[name] = old[name]
         if old.get("strict_rejudged"):
             r["correct"], r["judged"] = old["correct"], old["judged"]
+        for name in ("j_official", "j_official_reason", "j_official_failed"):
+            if name in official_cache.get(key, {}):
+                r[name] = official_cache[key][name]
+
+    if args.official_judge:
+        with official_judge(MEM0_OFFICIAL_JUDGE) as judge:
+            todo = [r for r in rows if r["category_name"] in STANDARD_CATEGORIES
+                    and (r.get("j_official") is None or r.get("j_official_failed"))]
+            print(f"J (Mem0 prompt, official judge {MEM0_OFFICIAL_JUDGE}): {len(todo)} to judge")
+
+            def run_official(r: dict) -> None:
+                res = judge.judge_mem0(question=r["question"], gold_answer=str(r["gold"]),
+                                       predicted_answer=r["predicted"])
+                r["j_official"] = res.correct if res.judged else None
+                r["j_official_reason"] = res.reason
+                r["j_official_failed"] = not res.judged
+
+            with ThreadPoolExecutor(max_workers=args.workers) as pool:
+                jobs = [pool.submit(run_official, r) for r in todo]
+                for i, f in enumerate(as_completed(jobs), 1):
+                    f.result()
+                    if i % 100 == 0 or i == len(todo):
+                        print(f"  ... {i}/{len(todo)} judged")
 
     if args.judge:
         with OpenCodeJudge(model=args.judge_model) as judge:
@@ -270,6 +336,9 @@ def main() -> int:
             fh.write(json.dumps(slim, ensure_ascii=False) + "\n")
     summary = summarize(rows)
     summary["judge_model"] = args.judge_model if args.judge else None
+    summary["official_judge_model"] = (
+        MEM0_OFFICIAL_JUDGE if any("j_official" in r for r in rows) else None
+    )
     summary["runs"] = args.runs
     (out_dir / "scores.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print_summary(summary, args.judge_model if args.judge or summary["j_mem0_judged"] else None)

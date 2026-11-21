@@ -462,18 +462,25 @@ class EngramClient:
         *,
         max_depth: str | None = None,
         session_context: str | None = None,
+        answer_style: str | None = None,
+        answer_instructions: str | None = None,
     ) -> dict[str, Any]:
         """POST a question. Returns {answer, retrieval_metadata, answerability}.
 
         The full `retrieval_metadata` is preserved by the caller -- it is what
         turns a bare score into failure analysis (route, answer mode, stop
-        reason, evidence counts, latency).
+        reason, evidence counts, latency). `answer_style` / `answer_instructions`
+        shape only Engram's final answer; memory search uses `question` alone.
         """
         body: dict[str, Any] = {"query": question}
         if max_depth is not None:
             body["max_depth"] = max_depth
         if session_context is not None:
             body["session_context"] = session_context
+        if answer_style is not None:
+            body["answer_style"] = answer_style
+        if answer_instructions is not None:
+            body["answer_instructions"] = answer_instructions
         # A dropped connection or a timeout is retried twice: a question only
         # reads memory, so asking it again is safe (85 of 1,986 answers were
         # once lost this way). The last failure is wrapped as EngramError so

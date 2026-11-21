@@ -30,6 +30,25 @@ def find_env_file(explicit: str | None = None) -> Path | None:
     return None
 
 
+def find_env_value(name: str) -> str | None:
+    """A variable from the environment, else from the first candidate file holding it.
+
+    load_env_file reads only the first file found (the repo's .env.local); a
+    key kept only in the workspace .env (e.g. OPENAI_API_KEY) is found here.
+    """
+    if os.environ.get(name):
+        return os.environ[name]
+    for c in _CANDIDATES:
+        p = Path(c)
+        if not p.exists():
+            continue
+        for line in p.read_text(encoding="utf-8").splitlines():
+            key, sep, value = line.strip().partition("=")
+            if sep and key.strip() == name and value.strip():
+                return value.strip().strip('"').strip("'")
+    return None
+
+
 def load_env_file(explicit: str | None = None, *, override: bool = False) -> Path | None:
     """Populate os.environ from a .env file. Returns the file used, if any."""
     path = find_env_file(explicit)

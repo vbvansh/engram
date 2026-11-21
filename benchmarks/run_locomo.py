@@ -46,6 +46,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 import subprocess
 import sys
 import time
@@ -201,11 +202,35 @@ def run_config(base_url: str, judge_model: str) -> dict:
     return cfg
 
 
-def _answer_one(client: EngramClient, judge: OpenCodeJudge, probe, max_depth: str | None):
+# LoCoMo's official QA protocol (snap-research/locomo task_eval/gpt_utils.py):
+# answers are short phrases, date questions get a date hint, and adversarial
+# questions become a choice between "Not mentioned in the conversation" and
+# the bait answer. Engram searches memory with the question alone; the hint
+# and the options reach only its answer step.
+OFFICIAL_TEMPORAL_HINT = "Use DATE of CONVERSATION to answer with an approximate date."
+OFFICIAL_NOT_MENTIONED = "Not mentioned in the conversation"
+
+
+def official_instructions(probe, key: str) -> str | None:
+    if probe.category == 2:
+        return OFFICIAL_TEMPORAL_HINT
+    if probe.category == 5:
+        options = [OFFICIAL_NOT_MENTIONED, str(probe.answer)]
+        # The official code orders the two options at random; seeding by
+        # question keeps the order the same in every run and for every system.
+        if random.Random(key).random() >= 0.5:
+            options.reverse()
+        return f"Select the correct answer: (a) {options[0]} (b) {options[1]}."
+    return None
+
+
+def _answer_one(client: EngramClient, judge: OpenCodeJudge, probe, max_depth: str | None,
+                instructions: str | None = None, answer_style: str | None = None):
     """Query Engram and judge the answer. Safe to call from worker threads."""
     started = time.monotonic()
     try:
-        res = client.query(probe.question, max_depth=max_depth)
+        res = client.query(probe.question, max_depth=max_depth, answer_style=answer_style,
+                           answer_instructions=instructions)
         answer = res.get("answer", "")
         meta = res.get("retrieval_metadata", {}) or {}
         answerability = res.get("answerability") or meta.get("answerability_state")
@@ -396,10 +421,16 @@ def run(args: argparse.Namespace) -> int:
 
                 # Questions are independent reads, so they may run in parallel.
                 # Results are written from this thread as they complete.
+                instructions = {
+                    qidx: official_instructions(probe, f"{conv.sample_id}:{qidx}")
+                    if args.official_format else None
+                    for qidx, probe in questions
+                }
+                style = "short" if args.official_format else None
                 with ThreadPoolExecutor(max_workers=args.query_workers) as pool:
                     futures = {
-                        pool.submit(_answer_one, client, judge, probe, args.max_depth):
-                            (qidx, probe)
+                        pool.submit(_answer_one, client, judge, probe, args.max_depth,
+                                    instructions[qidx], style): (qidx, probe)
                         for qidx, probe in questions
                     }
                     for future in as_completed(futures):
@@ -411,6 +442,7 @@ def run(args: argparse.Namespace) -> int:
                             "tenant_id": tenant_id,
                             "q_idx": qidx,
                             "question": probe.question,
+                            "answer_instructions": instructions[qidx],
                             "category": probe.category,
                             "category_name": probe.category_name,
                             "is_adversarial": probe.is_adversarial,
@@ -456,6 +488,7 @@ def run(args: argparse.Namespace) -> int:
     summary["skipped_conversations"] = skipped
     summary["mode"] = ("ingest-only" if args.ingest_only
                        else "questions-only" if args.reuse_tenant else "ingest+questions")
+    summary["official_format"] = bool(args.official_format)
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     if args.ingest_only:
         print("\n" + "=" * 62 + "\nINGEST ONLY - no questions asked\n" + "=" * 62)
@@ -546,6 +579,9 @@ def main() -> int:
     p.add_argument("--ingest-only", action="store_true",
                    help="store and wait, but ask no questions; ask them later with "
                         "--reuse-tenant once every conversation is stored")
+    p.add_argument("--official-format", action="store_true",
+                   help="ask in LoCoMo's official QA format: short-phrase answers, the date "
+                        "hint on temporal questions, answer options on adversarial ones")
     p.add_argument("--retry-failed", action="store_true",
                    help="after sending a conversation, send its FAILED messages back "
                         "through Engram's retry API (resume a store hit by an outage)")
