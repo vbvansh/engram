@@ -46,3 +46,4 @@ event_ledger.db
 
 # benchmark run outputs
 benchmarks/results/
+benchmarks/data/longmemeval/

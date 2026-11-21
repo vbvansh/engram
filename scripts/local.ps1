@@ -21,6 +21,8 @@
 #   .\scripts\local.ps1 merge <dirs>  # merge_results.py over run directories
 #   .\scripts\local.ps1 score <dir>   # standard LoCoMo metrics (F1, BLEU-1; add --judge for J)
 #   .\scripts\local.ps1 compare <before> <after>  # question-by-question comparison of two runs
+#   .\scripts\local.ps1 lme <args>    # run_longmemeval.py, e.g. lme --per-type 1 --tenant-run lmep1
+#   .\scripts\local.ps1 lme-score <dir>  # official LongMemEval grading (gpt-4o judge, OpenAI key)
 
 #
 # Overrides (environment variables): ENGRAM_LOCAL_ENV_FILE, ENGRAM_LOCAL_PYTHON.
@@ -29,7 +31,8 @@
 # word lands in $args and is passed through to the Python script unchanged.
 param(
     [ValidateSet("infra-up", "infra-ps", "infra-down", "migrate", "init", "health", "api",
-        "worker", "dispatcher", "smoke", "isolation", "quota", "judge-test", "bench", "merge", "score", "compare")]
+        "worker", "dispatcher", "smoke", "isolation", "quota", "judge-test", "bench", "merge", "score", "compare",
+        "lme", "lme-score")]
     [string]$Command
 )
 $EnvFile = $env:ENGRAM_LOCAL_ENV_FILE
@@ -86,5 +89,7 @@ switch ($Command) {
     "merge"      { & $Python benchmarks\merge_results.py @Rest }
     "score"      { & $Python benchmarks\score_locomo.py @Rest }
     "compare"    { & $Python benchmarks\compare_runs.py @Rest }
+    "lme"        { & $Python benchmarks\run_longmemeval.py @Rest }
+    "lme-score"  { & $Python benchmarks\score_longmemeval.py @Rest }
 }
 exit $LASTEXITCODE
