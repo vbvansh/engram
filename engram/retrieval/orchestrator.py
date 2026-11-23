@@ -1598,6 +1598,9 @@ def _finish_query(
 
 # answer_style="short": the wording of LoCoMo's official QA prompt ("write an
 # answer in the form of a short phrase ... exact words from the context").
+# Like the official prompt, it does not tell the model to refuse when unsure:
+# that extra rule turned 322 answerable LoCoMo questions into refusals.
+# _SHORT_NO_ANSWER is only the fixed reply when no evidence is found at all.
 _SHORT_NO_ANSWER = "No information available."
 _SHORT_ANSWER_SYSTEM = (
     "You are Engram's final answer generator. Use only the verified canonical "
@@ -1605,8 +1608,7 @@ _SHORT_ANSWER_SYSTEM = (
     "missing facts from similarity scores. Write the answer in the form of a "
     "short phrase, using exact words from the evidence whenever possible: no "
     "full sentence and no explanation. When the question offers answer options, "
-    "reply with the text of the option you choose. If the evidence does not "
-    f"answer the question, reply exactly: {_SHORT_NO_ANSWER}"
+    "reply with the text of the option you choose."
 )
 
 _EXACT_PREDICATE_TEMPLATES: dict[str, str] = {

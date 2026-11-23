@@ -516,6 +516,8 @@ def test_short_answer_style_changes_only_the_answer_step() -> None:
 
     system, user_query = short.prompts[0]
     assert "short phrase" in system and "short phrase" not in plain.prompts[0][0]
+    # Like LoCoMo's official prompt: no instruction to refuse when unsure.
+    assert "No information available" not in system
     assert user_query == (
         "What happened recently? Select the correct answer: (a) a party (b) a trip."
     )
