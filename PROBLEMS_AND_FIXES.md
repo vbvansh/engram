@@ -14,7 +14,7 @@ and how to fix each one. The numbers come from that test.
 | 4 | Facts get wrong or vague labels | Feeds problem 1; template answers only 10% correct | Keep searching after a guessed label — **template answers fixed** (see result below); a label list for everyday life, fixed synonyms |
 | 5 | Other users' memories crowd out search results | Search missed 8.5% of the right memories; no score change | Filter by user inside the search, not after it — **fixed** (see result below) |
 | 6 | Messages are stored without their context | "Does not specify" answers; single-hop 56% correct | Send earlier turns; don't drop a whole message — **fixed** (see result below) |
-| 7 | Short answers say "No information available" too often | Normal questions 7 points worse in LoCoMo's official format | Drop the extra "otherwise say no information" rule from the short-answer instruction — **proposed** |
+| 7 | Short answers say "No information available" too often | Normal questions 7 points worse in LoCoMo's official format | Drop the extra "otherwise say no information" rule from the short-answer instruction — **changed, being measured** |
 
 ---
 
@@ -317,17 +317,18 @@ building a library of classic children's books"; short answer "No information
 available."
 
 **Cost.** Measured on all 1,986 questions with the same stored memories,
-compared one by one with the long answers:
+compared one by one with the long answers (22 answers lost to timeouts were
+asked again):
 
 | | Long answers | Short answers |
 |---|---|---|
 | Answer length (median words) | 41 | 3 |
-| "No information available" on normal questions | 66 | 322 |
-| Strict score (1,540 normal questions) | 59.2% | 51.9% (−7.3, not luck) |
-| J score (1,540 normal questions, same judge) | 67.7% | 59.3% (−8.4, not luck) |
+| "No information available" on normal questions | 66 | 329 |
+| Strict score (1,540 normal questions) | 59.2% | 52.6% (−6.6, not luck) |
+| J score (1,540 normal questions, same judge) | 67.7% | 59.8% (−7.9, not luck) |
 | Open-domain questions (96, need a guess like "likely yes") | 44.8% | 13.5% |
 | Trick (adversarial) questions handled correctly | 59.4% | 94.6% |
-| Correct answers over all 1,986 questions | 1,177 | 1,222 |
+| Correct answers over all 1,986 questions | 1,177 | 1,232 |
 
 Part of the loss is normal for short answers: a long answer can list several
 details and include the right one, while a short answer picks one (about 100
@@ -335,15 +336,16 @@ questions, e.g. "fresh pastries" instead of "coffee and fresh pastries").
 About 64 losses are the extra "no information" rule. The trick questions
 became much easier because the two answer options are given.
 
-**Fix (proposed).** Remove the extra rule so the instruction matches the
-official test. Keep "No information available." only as Engram's fixed answer
-when its search finds nothing. Ask all questions again and compare.
+**Fix (changed, being measured).** The extra rule is removed, so the
+instruction matches the official test. "No information available." stays only
+as Engram's fixed answer when its search finds nothing. All questions are
+asked again and compared with the run above.
 
-**Official scores so far (first measurement, 22 answers still to be asked
-again after timeouts).** LoCoMo official F1 over all 1,986 questions: **53.6**
-(with long answers it was 10.6). J with the Mem0 paper's judge (gpt-4o-mini)
-on the 1,540 normal questions: **62.7**. LongMemEval pilot (6 questions,
-judge gpt-4o): 4 of 6 right — too few questions to mean much.
+**Official scores before this fix (all 1,986 answered).** LoCoMo official F1
+over all 1,986 questions: **54.1** (with long answers it was 10.6). J with the
+Mem0 paper's judge (gpt-4o-mini) on the 1,540 normal questions: **63.3**.
+LongMemEval pilot (6 questions, judge gpt-4o): 4 of 6 right — too few
+questions to mean much.
 
 ---
 
