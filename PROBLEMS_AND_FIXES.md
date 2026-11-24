@@ -14,7 +14,7 @@ and how to fix each one. The numbers come from that test.
 | 4 | Facts get wrong or vague labels | Feeds problem 1; template answers only 10% correct | Keep searching after a guessed label — **template answers fixed** (see result below); a label list for everyday life, fixed synonyms |
 | 5 | Other users' memories crowd out search results | Search missed 8.5% of the right memories; no score change | Filter by user inside the search, not after it — **fixed** (see result below) |
 | 6 | Messages are stored without their context | "Does not specify" answers; single-hop 56% correct | Send earlier turns; don't drop a whole message — **fixed** (see result below) |
-| 7 | Short answers say "No information available" too often | Normal questions 7 points worse in LoCoMo's official format | Drop the extra "otherwise say no information" rule from the short-answer instruction — **changed, being measured** |
+| 7 | Short answers say "No information available" too often | Normal questions 7 points worse in LoCoMo's official format | Drop the extra "otherwise say no information" rule from the short-answer instruction — **fixed** (see result below) |
 
 ---
 
@@ -336,14 +336,30 @@ questions, e.g. "fresh pastries" instead of "coffee and fresh pastries").
 About 64 losses are the extra "no information" rule. The trick questions
 became much easier because the two answer options are given.
 
-**Fix (changed, being measured).** The extra rule is removed, so the
-instruction matches the official test. "No information available." stays only
-as Engram's fixed answer when its search finds nothing. All questions are
-asked again and compared with the run above.
+**Fix.** The extra rule is removed, so the instruction matches the official
+test. "No information available." stays only as Engram's fixed answer when its
+search finds nothing.
 
-**Official scores before this fix (all 1,986 answered).** LoCoMo official F1
-over all 1,986 questions: **54.1** (with long answers it was 10.6). J with the
-Mem0 paper's judge (gpt-4o-mini) on the 1,540 normal questions: **63.3**.
+**Result — fixed.** All questions were asked again with the same stored
+memories and compared one by one with the short answers before the fix:
+
+| | Before | After |
+|---|---|---|
+| "No information available" on normal questions | 329 | 7 |
+| Open-domain questions (96) | 13.5% | 28.1% (+14.6, not luck) |
+| J score, Mem0's own judge gpt-4o-mini (1,540) | 63.3% | 67.1% (+3.8, not luck) |
+| J score, our judge (1,540) | 59.8% | 64.2% (+4.4, not luck) |
+| Strict score (1,540) | 52.6% | 54.2% (+1.6, could be luck) |
+| LoCoMo official F1 (all 1,986) | 54.1 | 55.1 |
+| Trick (adversarial) questions, LoCoMo's rule | 94.6% | 92.6% (8 answers failed, to be asked again) |
+| Correct answers over all 1,986 questions (strict) | 1,232 | 1,254 |
+
+Most questions that used to get "No information available" now get a real
+answer, but many of those answers are wrong: the right memory was often not
+found in the first place. So the strict score rises only a little, while the
+more lenient J score rises clearly. The fix was kept because it makes the
+test the same as the official one and nothing got significantly worse.
+
 LongMemEval pilot (6 questions, judge gpt-4o): 4 of 6 right — too few
 questions to mean much.
 
