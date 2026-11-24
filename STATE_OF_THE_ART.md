@@ -71,14 +71,14 @@ ones) gives overall F1: humans 87.9, best RAG (GPT-3.5) 41.4, GPT-4-turbo
 
 ## 4. Where Engram stands and what it has to beat
 
-**Engram today** (LoCoMo in the official format, run `locomo-1124004203`;
-answer model `muse-spark-1.3-contributor`):
+**Engram today** (LoCoMo in the official format, run
+`locomo-official2-combined`; answer model `muse-spark-1.3-contributor`):
 
 | | Overall | Multi-hop | Temporal | Open-domain | Single-hop |
 |---|---|---|---|---|---|
 | J, gpt-4o-mini judge (1,540 questions) | **67.1** | 66.7 | 76.0 | 40.6 | 66.8 |
-| F1, categories 1–4 | 44.2 | | | | |
-| Official F1, all 1,986 (adversarial 92.6) | **55.1** | | | | |
+| F1, categories 1–4 | 44.2 | 31.5 | 54.9 | 17.4 | 47.5 |
+| Official F1, all 1,986 (adversarial 94.0) | **55.4** | | | | |
 
 LongMemEval: only a 6-question pilot so far (4/6), so no number to report yet.
 

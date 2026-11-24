@@ -349,9 +349,9 @@ memories and compared one by one with the short answers before the fix:
 | Open-domain questions (96) | 13.5% | 28.1% (+14.6, not luck) |
 | J score, Mem0's own judge gpt-4o-mini (1,540) | 63.3% | 67.1% (+3.8, not luck) |
 | J score, our judge (1,540) | 59.8% | 64.2% (+4.4, not luck) |
-| Strict score (1,540) | 52.6% | 54.2% (+1.6, could be luck) |
-| LoCoMo official F1 (all 1,986) | 54.1 | 55.1 |
-| Trick (adversarial) questions, LoCoMo's rule | 94.6% | 92.6% (8 answers failed, to be asked again) |
+| Strict score (1,540) | 52.6% | 54.3% (+1.7, could be luck) |
+| LoCoMo official F1 (all 1,986) | 54.1 | 55.4 |
+| Trick (adversarial) questions, LoCoMo's rule | 94.6% | 94.0% (−0.6, within luck) |
 | Correct answers over all 1,986 questions (strict) | 1,232 | 1,254 |
 
 Most questions that used to get "No information available" now get a real
@@ -359,6 +359,14 @@ answer, but many of those answers are wrong: the right memory was often not
 found in the first place. So the strict score rises only a little, while the
 more lenient J score rises clearly. The fix was kept because it makes the
 test the same as the official one and nothing got significantly worse.
+Eight answers lost to timeouts and a briefly unavailable answer model were
+asked again, so every question has a real answer.
+
+**Engram's official LoCoMo result** (all 1,986 questions, LoCoMo's own
+question format): **F1 55.4**. J with Mem0's judge gpt-4o-mini on the 1,540
+normal questions: **67.1** (single-hop 66.8, multi-hop 66.7, temporal 76.0,
+open-domain 40.6). Trick questions: 94.0%. How this compares with other
+memory systems: see `STATE_OF_THE_ART.md`.
 
 LongMemEval pilot (6 questions, judge gpt-4o): 4 of 6 right — too few
 questions to mean much.
