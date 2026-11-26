@@ -1,0 +1,7 @@
+# Quick check after changing a model or prompt: one question per LoCoMo category (+1 temporal), ~2 min.
+conv-26:0
+conv-26:2
+conv-26:3
+conv-26:82
+conv-26:152
+conv-30:0

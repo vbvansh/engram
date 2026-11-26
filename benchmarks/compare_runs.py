@@ -65,6 +65,32 @@ def paired(before: dict, after: dict, keys: list, field: str) -> dict | None:
             "gained": gained, "lost": lost, "p": mcnemar_p(gained, lost)}
 
 
+def paired_f1(before: dict, after: dict, keys: list) -> dict | None:
+    """Official LoCoMo F1 per question, before vs after (needs scored.jsonl).
+
+    F1 is a number between 0 and 1, not right/wrong, so the luck test is a
+    sign test: count the questions whose F1 went up and down (ties ignored).
+    """
+    pairs = [(before[k].get("f1"), after[k].get("f1")) for k in keys]
+    pairs = [(b, a) for b, a in pairs if b is not None and a is not None]
+    if not pairs:
+        return None
+    up = sum(1 for b, a in pairs if a > b + 1e-9)
+    down = sum(1 for b, a in pairs if a < b - 1e-9)
+    return {"n": len(pairs), "before": 100 * sum(b for b, _ in pairs) / len(pairs),
+            "after": 100 * sum(a for _, a in pairs) / len(pairs),
+            "gained": up, "lost": down, "p": mcnemar_p(up, down)}
+
+
+def fmt_f1(label: str, s: dict | None) -> str:
+    if s is None:
+        return f"  {label:<28} (F1 missing: score both runs first)"
+    sig = "real (p<0.05)" if s["p"] < 0.05 else "could be luck"
+    return (f"  {label:<28} n={s['n']:>5}  {s['before']:5.1f} -> {s['after']:5.1f}  "
+            f"({s['after'] - s['before']:+5.1f})  up {s['gained']:>4}  down {s['lost']:>4}  "
+            f"p={s['p']:.3g}  {sig}")
+
+
 def fmt(label: str, s: dict | None) -> str:
     if s is None:
         return f"  {label:<28} (not available in both runs)"
@@ -114,6 +140,14 @@ def main() -> int:
     print(f"\nALL QUESTIONS, strict: {total['before'] * total['n'] / 100:.0f} -> "
           f"{total['after'] * total['n'] / 100:.0f} correct "
           f"(net {total['gained'] - total['lost']:+d}, p={total['p']:.3g})")
+
+    print("\nOFFICIAL LoCoMo F1 (word overlap; questions whose F1 went up / down)")
+    print(fmt_f1("all questions", paired_f1(before, after, keys)))
+    print(fmt_f1("standard (1-4)", paired_f1(before, after, std)))
+    for cat in (*STANDARD, "adversarial"):
+        ks = [k for k in keys if before[k]["category_name"] == cat]
+        if ks:
+            print(fmt_f1(cat, paired_f1(before, after, ks)))
 
     print("\nANSWER PATTERNS (all paired questions): before -> after")
     pb = Counter(pattern(before[k]) for k in keys)
