@@ -303,3 +303,19 @@ def test_openai_compat_frontier_maps_api_errors_to_core_model_error():
 
     with pytest.raises(CoreModelError, match="frontier API error"):
         provider.answer(system_prompt="", msc="", user_query="test")
+
+
+def test_frontier_verdict_accepts_an_echoed_label_when_an_answer_is_given():
+    import pytest
+
+    from engram.models.core import CoreModelError
+    from engram.models.providers.openai_compat import _frontier_verdict
+
+    assert _frontier_verdict({"verdict": "ANSWER", "answer": "x"}, "") == "ANSWER"
+    assert _frontier_verdict({"verdict": "need_more", "answer": ""}, "") == "NEED_MORE"
+    # gpt-4.1-mini echoed the MSC's evidence state instead of "ANSWER".
+    assert _frontier_verdict({"verdict": "ANSWERABLE", "answer": "ten years ago"}, "") == "ANSWER"
+    with pytest.raises(CoreModelError):
+        _frontier_verdict({"verdict": "ANSWERABLE", "answer": ""}, "raw")
+    with pytest.raises(CoreModelError):
+        _frontier_verdict(["not", "a", "dict"], "raw")

@@ -78,6 +78,25 @@ _FRONTIER_SYSTEM = (
 )
 
 
+def _frontier_verdict(data: Any, raw_text: str) -> str:
+    """Read the verdict of a frontier reply, tolerating near-miss labels.
+
+    Models sometimes echo a word from the context instead of the requested
+    label: gpt-4.1-mini wrote "ANSWERABLE" (the evidence state shown in the
+    MSC) on ~1% of LoCoMo questions while giving a valid answer. A reply with
+    an answer text counts as ANSWER; anything else is still rejected.
+    """
+    if not isinstance(data, dict):
+        raise CoreModelError(f"frontier returned invalid verdict: {raw_text[:200]!r}")
+    verdict = str(data.get("verdict") or "").strip().upper()
+    if verdict in {"ANSWER", "NEED_MORE"}:
+        return verdict
+    answer = data.get("answer")
+    if isinstance(answer, str) and answer.strip():
+        return "ANSWER"
+    raise CoreModelError(f"frontier returned invalid verdict: {raw_text[:200]!r}")
+
+
 def _correction_max_tokens(value: int) -> int:
     """Give a JSON-correction retry room for hidden reasoning tokens.
 
@@ -387,12 +406,11 @@ class OpenAICompatFrontierProvider(FrontierLLMProvider):
             raise CoreModelError(
                 f"frontier returned unparseable output: {raw_text[:200]!r}"
             ) from err
-        if not isinstance(data, dict) or data.get("verdict") not in {"ANSWER", "NEED_MORE"}:
-            raise CoreModelError(f"frontier returned invalid verdict: {raw_text[:200]!r}")
+        verdict = _frontier_verdict(data, raw_text)
 
         usage = getattr(resp, "usage", None)
         return FrontierVerdict(
-            verdict=data["verdict"],
+            verdict=verdict,
             answer=data.get("answer"),
             reason=data.get("reason"),
             suggested_queries=data.get("suggested_queries") or [],
@@ -507,12 +525,11 @@ class OpenAIResponsesFrontierProvider(FrontierLLMProvider):
             raise CoreModelError(
                 f"frontier returned unparseable output: {raw_text[:200]!r}"
             ) from err
-        if not isinstance(data, dict) or data.get("verdict") not in {"ANSWER", "NEED_MORE"}:
-            raise CoreModelError(f"frontier returned invalid verdict: {raw_text[:200]!r}")
+        verdict = _frontier_verdict(data, raw_text)
 
         usage = getattr(resp, "usage", None)
         return FrontierVerdict(
-            verdict=data["verdict"],
+            verdict=verdict,
             answer=data.get("answer"),
             reason=data.get("reason"),
             suggested_queries=data.get("suggested_queries") or [],
