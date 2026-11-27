@@ -1011,3 +1011,43 @@ def test_a_guessed_label_is_answered_by_the_model_after_memory_discovery() -> No
     assert result.answer == "verified answer"
     assert "hiking club" in frontier.calls[0]
     assert "backing each other up" in frontier.calls[0]
+
+
+class EmptyFirstFrontier(RecordingFrontier):
+    """Leaves the answer empty (NEED_MORE) for the first N calls, then answers."""
+
+    def __init__(self, empty_replies: int) -> None:
+        super().__init__()
+        self.empty_replies = empty_replies
+
+    def answer(
+        self,
+        *,
+        system_prompt: str,
+        msc: str,
+        user_query: str,
+        allow_need_more: bool = True,
+    ) -> FrontierVerdict:
+        del system_prompt, user_query, allow_need_more
+        self.calls.append(msc)
+        if len(self.calls) <= self.empty_replies:
+            return FrontierVerdict(verdict="NEED_MORE", answer="", reason="missing fact")
+        return FrontierVerdict(verdict="ANSWER", answer="verified answer")
+
+
+def test_final_answer_asks_again_when_the_model_leaves_it_empty() -> None:
+    frontier = EmptyFirstFrontier(empty_replies=1)
+    result = run_query(_context(RecentRepository(), frontier, neo=NeoDiscovery()),
+                       session_id=None, query="What happened recently?")
+
+    assert result.answer == "verified answer"
+    assert len(frontier.calls) == 2
+
+
+def test_short_answer_says_no_information_when_the_model_never_answers() -> None:
+    frontier = EmptyFirstFrontier(empty_replies=5)
+    result = run_query(_context(RecentRepository(), frontier, neo=NeoDiscovery()),
+                       session_id=None, query="What happened recently?", answer_style="short")
+
+    assert result.answer == "No information available."
+    assert len(frontier.calls) == 2  # asked once more, not endlessly

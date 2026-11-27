@@ -1561,29 +1561,43 @@ def _finish_query(
 
     started = time.perf_counter()
     try:
+        answer_system = _SHORT_ANSWER_SYSTEM if short else (
+            "You are Engram's final answer generator. Use only the verified "
+            "canonical evidence in the context. Preserve the stated "
+            "answerability state, temporal scope, and uncertainty. "
+            "Do not infer missing facts from similarity scores. Answer the "
+            "user's exact question in the first sentence, then add only "
+            "useful supporting facts. For an entity profile, prioritize "
+            "identity, role, organization or project, and important current "
+            "relationships. Preserve relationship direction exactly. Do not "
+            "describe how many memories, events, or chapters mention a fact "
+            "unless the user asks for provenance or history. Do not append a "
+            "generic no-more-evidence disclaimer when the retrieval state is "
+            "ANSWERABLE. Avoid internal retrieval terminology and repeated "
+            "facts. In entity profiles, render machine-style scalar values "
+            "such as project_orion as readable names and state qualifiers "
+            "such as fictional only once. Prefer two to four concise sentences."
+        )
         verdict: FrontierVerdict = frontier.answer(
-            system_prompt=_SHORT_ANSWER_SYSTEM if short else (
-                "You are Engram's final answer generator. Use only the verified "
-                "canonical evidence in the context. Preserve the stated "
-                "answerability state, temporal scope, and uncertainty. "
-                "Do not infer missing facts from similarity scores. Answer the "
-                "user's exact question in the first sentence, then add only "
-                "useful supporting facts. For an entity profile, prioritize "
-                "identity, role, organization or project, and important current "
-                "relationships. Preserve relationship direction exactly. Do not "
-                "describe how many memories, events, or chapters mention a fact "
-                "unless the user asks for provenance or history. Do not append a "
-                "generic no-more-evidence disclaimer when the retrieval state is "
-                "ANSWERABLE. Avoid internal retrieval terminology and repeated "
-                "facts. In entity profiles, render machine-style scalar values "
-                "such as project_orion as readable names and state qualifiers "
-                "such as fictional only once. Prefer two to four concise sentences."
-            ),
+            system_prompt=answer_system,
             msc=msc,
             user_query=answer_query,
             allow_need_more=False,
         )
-        answer = verdict.answer or _fallback_answer(assessment)
+        if not (verdict.answer or "").strip():
+            # This is the final call, yet the model asked for more context or
+            # left the answer empty (gpt-4.1-mini did so on ~5% of LoCoMo
+            # questions). Ask once more before giving up.
+            md.latency_ms["frontier_answer_empty"] = (time.perf_counter() - started) * 1000
+            verdict = frontier.answer(
+                system_prompt=answer_system,
+                msc=msc,
+                user_query=answer_query,
+                allow_need_more=False,
+            )
+        answer = (verdict.answer or "").strip() or (
+            _SHORT_NO_ANSWER if short else _fallback_answer(assessment)
+        )
     except (CoreModelError, CircuitOpenError, Exception) as err:
         log.error("frontier call failed: %s", err)
         answer = (
@@ -1600,7 +1614,8 @@ def _finish_query(
 # answer in the form of a short phrase ... exact words from the context").
 # Like the official prompt, it does not tell the model to refuse when unsure:
 # that extra rule turned 322 answerable LoCoMo questions into refusals.
-# _SHORT_NO_ANSWER is only the fixed reply when no evidence is found at all.
+# _SHORT_NO_ANSWER is only the fixed reply when no evidence is found at all,
+# or when the answer model gives no answer even when asked twice.
 _SHORT_NO_ANSWER = "No information available."
 _SHORT_ANSWER_SYSTEM = (
     "You are Engram's final answer generator. Use only the verified canonical "
