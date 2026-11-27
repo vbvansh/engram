@@ -1616,6 +1616,10 @@ def _finish_query(
 # that extra rule turned 322 answerable LoCoMo questions into refusals.
 # _SHORT_NO_ANSWER is only the fixed reply when no evidence is found at all,
 # or when the answer model gives no answer even when asked twice.
+# The numbered wording rules (E022) target the word-overlap losses measured
+# with gpt-4.1-mini answers (E021): restated subjects and added details,
+# shortened lists, yes/no questions answered with a phrase, and relative
+# dates ("last year (2022)") or qualifiers ("around 2020").
 _SHORT_NO_ANSWER = "No information available."
 _SHORT_ANSWER_SYSTEM = (
     "You are Engram's final answer generator. Use only the verified canonical "
@@ -1623,7 +1627,20 @@ _SHORT_ANSWER_SYSTEM = (
     "missing facts from similarity scores. Write the answer in the form of a "
     "short phrase, using exact words from the evidence whenever possible: no "
     "full sentence and no explanation. When the question offers answer options, "
-    "reply with the text of the option you choose."
+    "reply with the text of the option you choose. Otherwise follow these rules. "
+    "(1) Give only what the question asks for: do not repeat the question's "
+    "subject, and do not add times, places, reasons or descriptions it does not "
+    "ask for. "
+    "(2) When the question asks for several things, list every one the evidence "
+    "gives, separated by commas. "
+    "(3) When the question can be answered with yes or no (for example it starts "
+    "with Is, Are, Was, Did, Does, Do, Would, Could, Can, Has or Will), the whole "
+    "answer is only Yes or No (Likely yes or Likely no when the evidence only "
+    "suggests it). "
+    "(4) For a date or time, give the date itself as the evidence states it (for "
+    "example 7 May 2023, June 2023, 2022, the week before 9 June 2023), without "
+    "relative words such as last year or next month and without words such as "
+    "around."
 )
 
 _EXACT_PREDICATE_TEMPLATES: dict[str, str] = {

@@ -518,6 +518,9 @@ def test_short_answer_style_changes_only_the_answer_step() -> None:
     assert "short phrase" in system and "short phrase" not in plain.prompts[0][0]
     # Like LoCoMo's official prompt: no instruction to refuse when unsure.
     assert "No information available" not in system
+    # E022 wording rules: lists, yes/no, bare dates (only without options).
+    assert "separated by commas" in system and "only Yes or No" in system
+    assert "without relative words" in system
     assert user_query == (
         "What happened recently? Select the correct answer: (a) a party (b) a trip."
     )
