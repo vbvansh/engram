@@ -15,6 +15,7 @@ and how to fix each one. The numbers come from that test.
 | 5 | Other users' memories crowd out search results | Search missed 8.5% of the right memories; no score change | Filter by user inside the search, not after it — **fixed** (see result below) |
 | 6 | Messages are stored without their context | "Does not specify" answers; single-hop 56% correct | Send earlier turns; don't drop a whole message — **fixed** (see result below) |
 | 7 | Short answers say "No information available" too often | Normal questions 7 points worse in LoCoMo's official format | Drop the extra "otherwise say no information" rule from the short-answer instruction — **fixed** (see result below) |
+| 8 | A stronger answer model breaks Engram's answer format | 138 of 1,986 answers lost with gpt-4.1-mini | Accept near-miss labels; ask again when the final answer is empty — **fixed**; gpt-4.1-mini measured (see result below) |
 
 ---
 
@@ -370,6 +371,49 @@ memory systems: see `STATE_OF_THE_ART.md`.
 
 LongMemEval pilot (6 questions, judge gpt-4o): 4 of 6 right — too few
 questions to mean much.
+
+## 8. A stronger answer model breaks Engram's answer format
+
+**What happens.** Engram uses one model to store and search memories and a
+second model to write the final answer. To compare fairly with published
+systems, the answer model was switched from muse-spark to **gpt-4.1-mini**,
+the answer model used in the published comparison tables. Engram asks the
+answer model to reply in a fixed form: `{"verdict": "ANSWER", "answer": ...}`.
+gpt-4.1-mini broke this form in two ways that muse-spark never did:
+- It sometimes wrote the label `"ANSWERABLE"` instead of `"ANSWER"`, copying a
+  word from the memory context. The answer itself was fine, but Engram threw
+  the whole reply away: *"The answer generator is temporarily unavailable."*
+- On the last step, Engram tells the model it *must* answer. gpt-4.1-mini
+  still often replied "I need more information" with an empty answer, so
+  Engram wrote *"No verified answer was produced."*
+
+**Cost.** 138 of 1,986 answers lost (26 + 112), almost all normal questions.
+
+**Fix.**
+- A reply that contains an answer is used, whatever its label says.
+- If the final answer comes back empty, Engram asks once more. If it is
+  still empty, the short answer is "No information available."
+
+**Result — fixed, and gpt-4.1-mini measured.** The affected questions were
+asked again. Same stored memories and same questions; only the answer model
+changed (muse-spark → gpt-4.1-mini). Compared one by one:
+
+| | muse-spark | gpt-4.1-mini |
+|---|---|---|
+| J score, Mem0's own judge gpt-4o-mini (1,540) | 67.1% | 70.1% (+3.0, not luck) |
+| Strict score (1,540) | 54.3% | 57.0% (+2.7, not luck) |
+| Open-domain questions (strict) | 28.1% | 39.6% (+11.5, not luck) |
+| Trick (adversarial) questions, LoCoMo's rule | 93.9% | 94.2% (no change) |
+| LoCoMo official F1 (all 1,986) | 55.4 | 54.4 (−0.9, borderline) |
+| Correct answers over all 1,986 questions (strict) | 1,254 | 1,309 (+55) |
+| Answer length (average words) | 4.5 | 7.5 |
+
+gpt-4.1-mini gets more answers right, but it uses more words ("happy,
+focused, motivated, energized, and alive" where the correct answer is
+"happy"; "around 2020" for "2020"). LoCoMo's F1 counts word overlap, so the
+extra words cost points even when the answer is right: on the 954 questions
+both models got right, F1 is 63.7 with muse-spark and 60.8 with gpt-4.1-mini.
+The next step, rules for the wording of short answers, targets exactly this.
 
 ---
 

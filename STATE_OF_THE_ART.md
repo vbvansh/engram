@@ -80,6 +80,13 @@ ones) gives overall F1: humans 87.9, best RAG (GPT-3.5) 41.4, GPT-4-turbo
 | F1, categories 1–4 | 44.2 | 31.5 | 54.9 | 17.4 | 47.5 |
 | Official F1, all 1,986 (adversarial 94.0) | **55.4** | | | | |
 
+**With gpt-4.1-mini as answer model** (run `locomo-gpt41-combined`, 28 Nov
+2026; storing and search unchanged): J (gpt-4o-mini judge) **70.1** (single
+68.9, multi 69.5, temporal 80.4, open 47.9), official F1 54.4. This is the
+same answer model + judge as the independent harness in Table 2, where Zep
+scored 63.8, Supermemory 73.5, MemMachine 73.9, Letta 77.1, Mem0 77.7 and
+MemOS 88.8 (their answer prompts may differ from ours).
+
 LongMemEval: only a 6-question pilot so far (4/6), so no number to report yet.
 
 **Reading the tables:**
